@@ -2,13 +2,9 @@ services:
   - type: web
     name: jv-fitting
     runtime: python
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt --no-cache-dir
-    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 app:app
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.8
-      - key: PIP_NO_INDEX
-        value: "false"
-    cache:
-      paths:
-        - .venv
+        value: "3.11.8"
