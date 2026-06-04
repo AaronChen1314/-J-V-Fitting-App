@@ -292,6 +292,25 @@ def residual_values(J_data_mA, J_model, use_log):
     return (J_model - J_data_mA) / scale
 
 
+def candidate_scores(J_data_mA, J_model):
+    raw_rmse = rmse(J_data_mA, J_model)
+    current_scale = max(float(np.sqrt(np.mean(J_data_mA ** 2))), 1.0)
+    log_residuals = residual_values(J_data_mA, J_model, True)
+    log_rmse = float(np.sqrt(np.mean(log_residuals ** 2)))
+    data_log_scale = max(
+        float(np.sqrt(np.mean(residual_values(np.zeros_like(J_data_mA), J_data_mA, True) ** 2))),
+        1.0,
+    )
+    normalized_rmse = raw_rmse / current_scale
+    balanced_score = normalized_rmse + 0.15 * (log_rmse / data_log_scale)
+    return {
+        "rmse": raw_rmse,
+        "normalized_rmse": normalized_rmse,
+        "log_rmse": log_rmse,
+        "balanced_score": balanced_score,
+    }
+
+
 def fit_double_diode(V_data, J_data_mA, params=None, bounds=None, fixed=None, options=None):
     p0, b_min, b_max, meta = build_fit_inputs(V_data, J_data_mA, params, bounds)
     fixed = fixed or {}
@@ -302,7 +321,17 @@ def fit_double_diode(V_data, J_data_mA, params=None, bounds=None, fixed=None, op
     idx_fixed = np.where(fixed_flags)[0]
     if len(idx_free) == 0:
         J_final, solver = double_diode_model(V_data, *p0, return_diagnostics=True)
-        diagnostics = build_diagnostics(p0, b_min, b_max, solver, {"success": True, "message": "全部参数已锁定。"}, options)
+        optimizer = {"success": True, "message": "全部参数已锁定。", "evaluations": 0}
+        scores = candidate_scores(J_data_mA, J_final)
+        candidate = candidate_summary("locked", scores, solver, optimizer, ["锁定参数"])
+        diagnostics = build_diagnostics(p0, b_min, b_max, solver, optimizer, options)
+        diagnostics.update({
+            "mode": "锁定参数",
+            "stages": ["锁定参数"],
+            "selection_metric": normalize_selection_metric(options.get("selection_metric")),
+            "selected_candidate": candidate["name"],
+            "candidates": [candidate],
+        })
         return p0, J_final, rmse(J_data_mA, J_final), {**meta, **diagnostics}
 
     free_names = [PARAM_NAMES[i] for i in idx_free]
@@ -320,25 +349,76 @@ def fit_double_diode(V_data, J_data_mA, params=None, bounds=None, fixed=None, op
     use_global = bool(options.get("use_global", False))
     use_nelder = bool(options.get("use_nelder", False))
     use_log = bool(options.get("use_log", False))
+    selection_metric = normalize_selection_metric(options.get("selection_metric"))
 
-    def residual_func(params_free):
+    def residual_func(params_free, use_log_residual=False):
         p_full = reconstruct_full_params(params_free)
         J_model, solver = double_diode_model(V_data, *p_full, return_diagnostics=True)
-        residuals = residual_values(J_data_mA, J_model, use_log)
+        residuals = residual_values(J_data_mA, J_model, use_log_residual)
         if solver["failed_points"]:
             residuals = residuals + np.where(solver["converged_mask"], 0.0, 10.0)
         return residuals
 
-    def cost_func(params_free):
+    def cost_func(params_free, use_log_residual=False):
         if np.any(params_free < b_min_free) or np.any(params_free > b_max_free):
             return 1e20
-        residuals = residual_func(params_free)
+        residuals = residual_func(params_free, use_log_residual)
         return float(np.sum(residuals ** 2))
 
-    final_params_free = p0_free.copy()
+    candidates = []
+
+    def add_candidate(name, params_free, optimizer, stages):
+        params_free = np.clip(np.asarray(params_free, dtype=float), b_min_free, b_max_free)
+        params_full = reconstruct_full_params(params_free)
+        model, solver = double_diode_model(V_data, *params_full, return_diagnostics=True)
+        scores = candidate_scores(J_data_mA, model)
+        candidates.append({
+            "name": name,
+            "params_free": params_free,
+            "params": params_full,
+            "model": model,
+            "solver": solver,
+            "optimizer": optimizer,
+            "stages": stages,
+            "scores": scores,
+        })
+        return candidates[-1]
+
+    def run_lsq(name, start, use_log_residual, stages):
+        result = least_squares(
+            lambda values: residual_func(values, use_log_residual),
+            np.clip(start, b_min_free, b_max_free),
+            bounds=(b_min_free, b_max_free),
+            loss="linear",
+            max_nfev=bounded_int(
+                options.get("log_max_nfev" if use_log_residual else "max_nfev"),
+                300 if use_log_residual else 2400,
+                20,
+                5000,
+            ),
+            xtol=1e-9,
+            ftol=1e-9,
+            gtol=1e-9,
+        )
+        optimizer = {
+            "success": bool(result.success),
+            "message": str(result.message),
+            "evaluations": int(result.nfev),
+            "cost": float(result.cost),
+        }
+        return add_candidate(name, result.x, optimizer, stages)
+
+    add_candidate(
+        "initial",
+        p0_free,
+        {"success": True, "message": "初始参数候选。", "evaluations": 0},
+        ["初始参数"],
+    )
+    linear_candidate = run_lsq("linear_lsq", p0_free, False, ["线性最小二乘"])
+
     if use_global:
         result = differential_evolution(
-            cost_func,
+            lambda values: cost_func(values, False),
             list(zip(b_min_free, b_max_free)),
             strategy="best1bin",
             maxiter=bounded_int(options.get("global_maxiter"), 35, 1, 100),
@@ -347,12 +427,24 @@ def fit_double_diode(V_data, J_data_mA, params=None, bounds=None, fixed=None, op
             polish=False,
             updating="immediate",
         )
-        final_params_free = result.x
+        global_candidate = add_candidate(
+            "global",
+            result.x,
+            {
+                "success": bool(result.success),
+                "message": str(result.message),
+                "evaluations": int(result.nfev),
+                "cost": float(result.fun),
+            },
+            ["差分进化"],
+        )
+        run_lsq("global_linear_lsq", global_candidate["params_free"], False, ["差分进化", "线性最小二乘"])
 
     if use_nelder:
+        best_rmse_candidate = min(candidates, key=lambda item: item["scores"]["rmse"])
         res = minimize(
-            cost_func,
-            final_params_free,
+            lambda values: cost_func(values, False),
+            best_rmse_candidate["params_free"],
             method="Nelder-Mead",
             tol=1e-5,
             options={
@@ -361,29 +453,72 @@ def fit_double_diode(V_data, J_data_mA, params=None, bounds=None, fixed=None, op
                 "fatol": 1e-5,
             },
         )
-        final_params_free = np.clip(res.x, b_min_free, b_max_free)
+        nelder_candidate = add_candidate(
+            "nelder_mead",
+            res.x,
+            {
+                "success": bool(res.success),
+                "message": str(res.message),
+                "evaluations": int(res.nfev),
+                "cost": float(res.fun),
+            },
+            best_rmse_candidate["stages"] + ["Nelder-Mead"],
+        )
+        run_lsq(
+            "nelder_linear_lsq",
+            nelder_candidate["params_free"],
+            False,
+            nelder_candidate["stages"] + ["线性最小二乘"],
+        )
 
-    lsq = least_squares(
-        residual_func,
-        final_params_free,
-        bounds=(b_min_free, b_max_free),
-        loss="linear",
-        max_nfev=bounded_int(options.get("max_nfev"), 2400, 20, 5000),
-        xtol=1e-9,
-        ftol=1e-9,
-        gtol=1e-9,
+    if use_log:
+        run_lsq("low_current_lsq", p0_free, True, ["低电流候选"])
+        run_lsq(
+            "best_linear_low_current_lsq",
+            linear_candidate["params_free"],
+            True,
+            ["线性最小二乘", "低电流候选"],
+        )
+
+    selected = select_candidate(candidates, selection_metric)
+    diagnostics = build_diagnostics(
+        selected["params"], b_min, b_max, selected["solver"], selected["optimizer"], options
     )
-    final_params_free = lsq.x
-    final_params_full = reconstruct_full_params(final_params_free)
-    J_final, solver = double_diode_model(V_data, *final_params_full, return_diagnostics=True)
-    optimizer = {
-        "success": bool(lsq.success),
-        "message": str(lsq.message),
-        "evaluations": int(lsq.nfev),
-        "cost": float(lsq.cost),
+    diagnostics.update({
+        "mode": "整体 RMSE 择优" if selection_metric == "rmse" else "低电流优先择优",
+        "stages": selected["stages"],
+        "selection_metric": selection_metric,
+        "selected_candidate": selected["name"],
+        "candidates": [
+            candidate_summary(
+                item["name"], item["scores"], item["solver"], item["optimizer"], item["stages"]
+            )
+            for item in candidates
+        ],
+    })
+    return selected["params"], selected["model"], selected["scores"]["rmse"], {**meta, **diagnostics}
+
+
+def normalize_selection_metric(value):
+    return "balanced" if value == "balanced" else "rmse"
+
+
+def select_candidate(candidates, selection_metric):
+    score_key = "rmse" if normalize_selection_metric(selection_metric) == "rmse" else "balanced_score"
+    return min(candidates, key=lambda item: (item["scores"][score_key], item["scores"]["rmse"]))
+
+
+def candidate_summary(name, scores, solver, optimizer, stages):
+    return {
+        "name": name,
+        "rmse": scores["rmse"],
+        "normalized_rmse": scores["normalized_rmse"],
+        "log_rmse": scores["log_rmse"],
+        "balanced_score": scores["balanced_score"],
+        "failed_points": solver["failed_points"],
+        "optimizer_success": bool(optimizer.get("success", False)),
+        "stages": stages,
     }
-    diagnostics = build_diagnostics(final_params_full, b_min, b_max, solver, optimizer, options)
-    return final_params_full, J_final, rmse(J_data_mA, J_final), {**meta, **diagnostics}
 
 
 def bounded_int(value, default, minimum, maximum):

@@ -37,6 +37,21 @@ class ModelDiagnosticsTests(unittest.TestCase):
         wrong_sign = np.abs(app.residual_values(np.array([-10.0]), np.array([9.0]), True))[0]
         self.assertGreater(wrong_sign, same_sign)
 
+    def test_candidate_scores_include_both_selection_metrics(self):
+        scores = app.candidate_scores(np.array([-10.0, -5.0]), np.array([-9.0, -4.0]))
+        self.assertGreater(scores["rmse"], 0)
+        self.assertGreater(scores["balanced_score"], 0)
+        self.assertIn("log_rmse", scores)
+
+    def test_invalid_selection_metric_defaults_to_rmse(self):
+        self.assertEqual(app.normalize_selection_metric("unknown"), "rmse")
+        self.assertEqual(app.normalize_selection_metric("balanced"), "balanced")
+
+    def test_candidate_tie_keeps_earlier_candidate(self):
+        scores = {"rmse": 1.0, "balanced_score": 1.0}
+        candidates = [{"name": "first", "scores": scores}, {"name": "second", "scores": scores}]
+        self.assertEqual(app.select_candidate(candidates, "rmse")["name"], "first")
+
 
 class ApiTests(unittest.TestCase):
     @classmethod
@@ -55,6 +70,12 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(data["meta"]["solver"]["failed_points"], 0)
         self.assertEqual(len(data["V"]), len(data["J_fit"]))
 
+    def test_page_exposes_selection_controls(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('name="selectionMetric"', html)
+        self.assertIn('value="rmse" checked', html)
+        self.assertIn("生成低电流候选", html)
+
     def test_invalid_bounds_return_clear_error(self):
         response = self.client.post(
             "/api/preview",
@@ -71,6 +92,7 @@ class ApiTests(unittest.TestCase):
         data = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(data["meta"]["optimizer"]["message"], "全部参数已锁定。")
+        self.assertEqual(data["meta"]["selected_candidate"], "locked")
 
     def test_partial_parameter_lock(self):
         response = self.client.post(
@@ -94,6 +116,65 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertLess(data["rmse"], 0.35)
                 self.assertEqual(data["meta"]["solver"]["failed_points"], 0)
+
+    def test_rmse_selection_never_returns_worse_candidate(self):
+        for sample_name, csv in self.samples.items():
+            with self.subTest(sample=sample_name):
+                response = self.client.post(
+                    "/api/fit",
+                    json={
+                        "csv": csv,
+                        "options": {"use_log": True, "selection_metric": "rmse", "log_max_nfev": 40},
+                    },
+                )
+                data = response.get_json()
+                candidate_rmse = [candidate["rmse"] for candidate in data["meta"]["candidates"]]
+                self.assertAlmostEqual(data["rmse"], min(candidate_rmse))
+                self.assertEqual(data["meta"]["selection_metric"], "rmse")
+
+    def test_optional_strategies_only_add_candidates(self):
+        response = self.client.post(
+            "/api/fit",
+            json={
+                "csv": self.samples["nbg"],
+                "fixed": {"Jph": True, "n1": True, "n2": True, "Rs": True, "Rsh": True},
+                "options": {
+                    "use_global": True,
+                    "use_nelder": True,
+                    "use_log": True,
+                    "selection_metric": "rmse",
+                    "max_nfev": 30,
+                    "log_max_nfev": 30,
+                    "global_maxiter": 1,
+                    "global_popsize": 3,
+                    "nelder_maxiter": 10,
+                },
+            },
+        )
+        data = response.get_json()
+        names = {candidate["name"] for candidate in data["meta"]["candidates"]}
+        self.assertTrue({"linear_lsq", "global", "nelder_mead", "low_current_lsq"} <= names)
+        self.assertAlmostEqual(data["rmse"], min(candidate["rmse"] for candidate in data["meta"]["candidates"]))
+
+    def test_balanced_selection_returns_lowest_balanced_score(self):
+        response = self.client.post(
+            "/api/fit",
+            json={
+                "csv": self.samples["nbg"],
+                "fixed": {"Jph": True, "n1": True, "n2": True, "Rs": True, "Rsh": True},
+                "options": {
+                    "use_log": True,
+                    "selection_metric": "balanced",
+                    "max_nfev": 30,
+                    "log_max_nfev": 30,
+                },
+            },
+        )
+        data = response.get_json()
+        candidates = data["meta"]["candidates"]
+        selected = next(item for item in candidates if item["name"] == data["meta"]["selected_candidate"])
+        self.assertAlmostEqual(selected["balanced_score"], min(item["balanced_score"] for item in candidates))
+        self.assertEqual(data["meta"]["selection_metric"], "balanced")
 
 
 if __name__ == "__main__":

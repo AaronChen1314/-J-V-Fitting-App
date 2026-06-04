@@ -175,9 +175,12 @@ function updateQuality(meta = {}) {
 
 function setResultText(data, prefix = '') {
     const meta = data.meta || {};
+    const selectionLabel = meta.selection_metric === 'balanced' ? '低电流优先' : '整体 RMSE';
     const lines = [
         `${prefix}RMSE: ${data.rmse.toFixed(6)}`,
         `模式: ${meta.mode || '--'}`,
+        `入选候选: ${meta.selected_candidate || '--'}`,
+        `择优标准: ${selectionLabel}`,
         `阶段: ${(meta.stages || []).join(' → ') || '--'}`,
         `求解收敛点: ${meta.solver?.converged_points ?? '--'} / ${meta.solver?.points ?? '--'}`,
         `优化评估次数: ${meta.optimizer?.evaluations ?? '--'}`,
@@ -185,6 +188,15 @@ function setResultText(data, prefix = '') {
     ];
     for (const [name, value] of Object.entries(data.params)) {
         lines.push(`${name}: ${formatValue(name, value)}${data.fixed?.[name] ? ' [锁定]' : ''}`);
+    }
+    if (meta.candidates?.length) {
+        lines.push('', '候选对比:');
+        for (const candidate of meta.candidates) {
+            const selectedMark = candidate.name === meta.selected_candidate ? ' [入选]' : '';
+            lines.push(
+                `- ${candidate.name}${selectedMark}: RMSE=${candidate.rmse.toFixed(6)}, 综合评分=${candidate.balanced_score.toFixed(6)}`
+            );
+        }
     }
     if (meta.warnings?.length) lines.push('', '警告:', ...meta.warnings.map(item => `- ${item}`));
     document.getElementById('resultContainer').textContent = lines.join('\n');
@@ -247,7 +259,7 @@ function setFitRunning(running, options = {}) {
     cancelButton.classList.toggle('hidden', !running);
     window.clearInterval(progressTimer);
     if (!running) return;
-    const stages = [...(options.use_global ? ['差分进化'] : []), ...(options.use_nelder ? ['Nelder-Mead'] : []), '最小二乘'];
+    const stages = ['线性最小二乘', ...(options.use_global ? ['差分进化'] : []), ...(options.use_nelder ? ['Nelder-Mead'] : []), ...(options.use_log ? ['低电流候选'] : []), '自动择优'];
     let progress = 8;
     let stageIndex = 0;
     document.getElementById('progressFill').style.width = `${progress}%`;
@@ -267,7 +279,8 @@ async function runFit() {
     const options = {
         use_global: document.getElementById('useGlobal').checked,
         use_nelder: document.getElementById('useNelder').checked,
-        use_log: document.getElementById('useLog').checked
+        use_log: document.getElementById('useLog').checked,
+        selection_metric: document.querySelector('input[name="selectionMetric"]:checked').value
     };
     fitController = new AbortController();
     setFitRunning(true, options);
