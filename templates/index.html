@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>J-V 曲线拟合 - 双二极管模型</title>
+    <title>光态 J-V 曲线拟合 - 双二极管模型</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>J-V 曲线拟合 (双二极管模型)</h1>
+            <h1>光态 J-V 曲线拟合</h1>
             <p class="subtitle">Double Diode Model Fitting Tool</p>
         </header>
 
@@ -25,9 +25,7 @@
 
                 <section class="card">
                     <h2>2. 参数设置</h2>
-                    <div id="paramContainer" class="params-grid">
-                        <!-- Parameters will be dynamically generated -->
-                    </div>
+                    <div id="paramContainer" class="params-grid"></div>
                 </section>
 
                 <section class="card">
@@ -38,7 +36,7 @@
                     </label>
                     <label class="checkbox-label">
                         <input type="checkbox" id="useNelder" checked>
-                        <span>使用 Nelder-Mead (推荐)</span>
+                        <span>使用 Nelder-Mead</span>
                     </label>
                     <label class="checkbox-label">
                         <input type="checkbox" id="useLog">
@@ -52,9 +50,7 @@
 
                 <section class="card">
                     <h2>4. 结果</h2>
-                    <div id="resultContainer" class="result-box">
-                        <p class="placeholder">等待拟合...</p>
-                    </div>
+                    <div id="resultContainer" class="result-box">等待导入数据...</div>
                     <div class="btn-group">
                         <button id="exportParams" class="btn-secondary" disabled>导出参数</button>
                         <button id="exportCSV" class="btn-secondary" disabled>导出 CSV</button>

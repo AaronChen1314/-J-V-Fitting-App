@@ -1,6 +1,8 @@
 let chart = null;
 let currentCSV = null;
 let lastResult = null;
+let previewTimer = null;
+let previewController = null;
 
 const defaultParams = {
     Jph: 10,
@@ -13,83 +15,151 @@ const defaultParams = {
 };
 
 const paramBounds = {
-    Jph: { min: 0, max: 50 },
-    J01: { min: 1e-20, max: 1e-5, log: true },
-    J02: { min: 1e-15, max: 1e-3, log: true },
-    n1: { min: 0.5, max: 2.0 },
-    n2: { min: 1.0, max: 4.0 },
-    Rs: { min: 0.01, max: 100 },
-    Rsh: { min: 10, max: 1e6 }
+    Jph: { min: 0, max: 50, step: 0.01 },
+    J01: { min: 1e-20, max: 1e-5, step: 0.05, log: true },
+    J02: { min: 1e-15, max: 1e-3, step: 0.05, log: true },
+    n1: { min: 0.5, max: 2.0, step: 0.001 },
+    n2: { min: 1.0, max: 4.0, step: 0.001 },
+    Rs: { min: 0.01, max: 100, step: 0.01 },
+    Rsh: { min: 10, max: 1e6, step: 1 }
 };
+
+const paramLabels = {
+    Jph: 'Jph / Jsc',
+    J01: 'J01',
+    J02: 'J02',
+    n1: 'n1',
+    n2: 'n2',
+    Rs: 'Rs',
+    Rsh: 'Rsh'
+};
+
+function formatValue(name, value) {
+    if (!Number.isFinite(value)) return '';
+    if (paramBounds[name].log || Math.abs(value) >= 1e4 || Math.abs(value) < 1e-3) {
+        return value.toExponential(4);
+    }
+    return value.toFixed(name === 'Rsh' ? 2 : 4);
+}
+
+function valueToSlider(name, value) {
+    return paramBounds[name].log ? Math.log10(Math.max(value, 1e-30)) : value;
+}
+
+function sliderToValue(name, value) {
+    return paramBounds[name].log ? Math.pow(10, value) : value;
+}
+
+function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+}
 
 function initParams() {
     const container = document.getElementById('paramContainer');
     container.innerHTML = '';
+
     for (const [name, val] of Object.entries(defaultParams)) {
         const bounds = paramBounds[name];
         const div = document.createElement('div');
         div.className = 'param-item';
         div.innerHTML = `
             <div class="param-header">
-                <span class="param-name">${name}</span>
+                <span class="param-name">${paramLabels[name]}</span>
                 <label class="fixed-checkbox">
                     <input type="checkbox" id="fixed-${name}">
                     <span>锁定</span>
                 </label>
             </div>
-            <input type="range" class="param-slider" id="slider-${name}" 
-                   min="${bounds.log ? Math.log10(bounds.min) : bounds.min}"
-                   max="${bounds.log ? Math.log10(bounds.max) : bounds.max}"
-                   step="${bounds.log ? 0.1 : 0.01}"
-                   value="${bounds.log ? Math.log10(val) : val}">
+            <div class="param-live-value" id="live-${name}">${formatValue(name, val)}</div>
+            <input type="range" class="param-slider" id="slider-${name}">
             <div class="param-inputs">
-                <div class="param-input">
-                    <label>Min</label>
-                    <input type="text" id="min-${name}" value="${bounds.min}">
-                </div>
-                <div class="param-input">
-                    <label>Max</label>
-                    <input type="text" id="max-${name}" value="${bounds.max}">
-                </div>
-                <div class="param-input">
-                    <label>Val</label>
-                    <input type="text" id="val-${name}" value="${bounds.log ? val.toExponential(2) : val.toFixed(4)}">
-                </div>
+                <label class="param-input">
+                    <span>Min</span>
+                    <input type="number" id="min-${name}" value="${bounds.min}" step="any">
+                </label>
+                <label class="param-input">
+                    <span>Max</span>
+                    <input type="number" id="max-${name}" value="${bounds.max}" step="any">
+                </label>
+                <label class="param-input">
+                    <span>Val</span>
+                    <input type="number" id="val-${name}" value="${val}" step="any">
+                </label>
             </div>
         `;
         container.appendChild(div);
-        document.getElementById(`slider-${name}`).addEventListener('input', () => updateParamValue(name));
-        document.getElementById(`val-${name}`).addEventListener('change', () => updateSliderFromValue(name));
+
+        const slider = document.getElementById(`slider-${name}`);
+        slider.min = bounds.log ? Math.log10(bounds.min) : bounds.min;
+        slider.max = bounds.log ? Math.log10(bounds.max) : bounds.max;
+        slider.step = bounds.step;
+        slider.value = valueToSlider(name, val);
+
+        slider.addEventListener('input', () => {
+            const value = sliderToValue(name, parseFloat(slider.value));
+            setParamValue(name, value, false);
+            schedulePreview();
+        });
+        document.getElementById(`val-${name}`).addEventListener('input', () => {
+            syncSliderFromValue(name);
+            schedulePreview();
+        });
+        document.getElementById(`min-${name}`).addEventListener('change', () => updateBoundsForParam(name));
+        document.getElementById(`max-${name}`).addEventListener('change', () => updateBoundsForParam(name));
     }
 }
 
-function updateParamValue(name) {
-    const slider = document.getElementById(`slider-${name}`);
-    const valInput = document.getElementById(`val-${name}`);
-    const bounds = paramBounds[name];
-    let val = parseFloat(slider.value);
-    if (bounds.log) val = Math.pow(10, val);
-    valInput.value = bounds.log ? val.toExponential(2) : val.toFixed(4);
+function setParamValue(name, value, updateSlider = true) {
+    const min = parseFloat(document.getElementById(`min-${name}`).value);
+    const max = parseFloat(document.getElementById(`max-${name}`).value);
+    const safeValue = clamp(value, min, max);
+    document.getElementById(`val-${name}`).value = safeValue;
+    document.getElementById(`live-${name}`).textContent = formatValue(name, safeValue);
+    if (updateSlider) {
+        document.getElementById(`slider-${name}`).value = valueToSlider(name, safeValue);
+    }
 }
 
-function updateSliderFromValue(name) {
+function syncSliderFromValue(name) {
+    const input = document.getElementById(`val-${name}`);
+    const value = parseFloat(input.value);
+    if (!Number.isFinite(value)) return;
+    setParamValue(name, value, true);
+}
+
+function updateBoundsForParam(name) {
     const slider = document.getElementById(`slider-${name}`);
-    const valInput = document.getElementById(`val-${name}`);
-    const bounds = paramBounds[name];
-    let val = parseFloat(valInput.value);
-    if (bounds.log) val = Math.log10(val);
-    slider.value = val;
+    let min = parseFloat(document.getElementById(`min-${name}`).value);
+    let max = parseFloat(document.getElementById(`max-${name}`).value);
+    if (!Number.isFinite(min)) min = paramBounds[name].min;
+    if (!Number.isFinite(max)) max = paramBounds[name].max;
+    if (paramBounds[name].log) {
+        min = Math.max(min, 1e-30);
+        max = Math.max(max, min * 10);
+    }
+    if (max <= min) max = min + Math.max(Math.abs(min), 1);
+
+    document.getElementById(`min-${name}`).value = min;
+    document.getElementById(`max-${name}`).value = max;
+    slider.min = paramBounds[name].log ? Math.log10(min) : min;
+    slider.max = paramBounds[name].log ? Math.log10(max) : max;
+    syncSliderFromValue(name);
+    schedulePreview();
 }
 
 function getCurrentParams() {
     const params = {};
+    const bounds = {};
     const fixed = {};
     for (const name of Object.keys(defaultParams)) {
-        const val = parseFloat(document.getElementById(`val-${name}`).value);
-        params[name] = val;
+        params[name] = parseFloat(document.getElementById(`val-${name}`).value);
+        bounds[name] = {
+            min: parseFloat(document.getElementById(`min-${name}`).value),
+            max: parseFloat(document.getElementById(`max-${name}`).value)
+        };
         fixed[name] = document.getElementById(`fixed-${name}`).checked;
     }
-    return { params, fixed };
+    return { params, bounds, fixed };
 }
 
 function initChart() {
@@ -101,19 +171,19 @@ function initChart() {
                 {
                     label: '实验数据',
                     data: [],
-                    borderColor: '#3b82f6',
-                    backgroundColor: 'rgba(59, 130, 246, 0.8)',
-                    pointRadius: 5,
-                    pointHoverRadius: 7,
+                    borderColor: '#2563eb',
+                    backgroundColor: 'rgba(37, 99, 235, 0.75)',
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
                     showLine: false,
                     fill: false
                 },
                 {
-                    label: '拟合曲线',
+                    label: '模型曲线',
                     data: [],
-                    borderColor: '#ef4444',
-                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                    borderWidth: 3,
+                    borderColor: '#dc2626',
+                    backgroundColor: 'rgba(220, 38, 38, 0.1)',
+                    borderWidth: 2,
                     pointRadius: 0,
                     showLine: true,
                     fill: false
@@ -123,6 +193,7 @@ function initChart() {
         options: {
             responsive: true,
             maintainAspectRatio: false,
+            animation: false,
             plugins: {
                 title: {
                     display: true,
@@ -136,12 +207,12 @@ function initChart() {
                     type: 'linear',
                     position: 'bottom',
                     title: { display: true, text: 'Voltage (V)', font: { size: 14 } },
-                    grid: { color: 'rgba(0,0,0,0.05)' }
+                    grid: { color: 'rgba(0,0,0,0.06)' }
                 },
                 y: {
                     type: 'linear',
                     title: { display: true, text: 'Current Density (mA/cm²)', font: { size: 14 } },
-                    grid: { color: 'rgba(0,0,0,0.05)' }
+                    grid: { color: 'rgba(0,0,0,0.06)' }
                 }
             }
         }
@@ -150,10 +221,71 @@ function initChart() {
 
 function updateChart(V, JExp, JFit = null) {
     chart.data.datasets[0].data = V.map((v, i) => ({ x: v, y: JExp[i] }));
-    if (JFit) {
-        chart.data.datasets[1].data = V.map((v, i) => ({ x: v, y: JFit[i] }));
+    chart.data.datasets[1].data = JFit ? V.map((v, i) => ({ x: v, y: JFit[i] })) : [];
+    chart.update('none');
+}
+
+function setResultText(data, prefix = '') {
+    let resultText = `${prefix}RMSE: ${data.rmse.toFixed(6)}\n\n`;
+    for (const [name, val] of Object.entries(data.params)) {
+        resultText += `${name}: ${formatValue(name, val)}`;
+        if (data.fixed && data.fixed[name]) resultText += ' [锁定]';
+        resultText += '\n';
     }
-    chart.update();
+    document.getElementById('resultContainer').textContent = resultText;
+}
+
+function updateInputsFromParams(params) {
+    for (const [name, val] of Object.entries(params)) {
+        setParamValue(name, val, true);
+    }
+}
+
+function parseAndPreviewUploadedCsv() {
+    const lines = currentCSV.split(/\r?\n/).filter(line => line.trim());
+    const data = [];
+    for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(',').map(v => parseFloat(v.trim()));
+        if (Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
+            data.push(parts);
+        }
+    }
+    const V = data.map(d => d[0]);
+    let J = data.map(d => d[1]);
+    const meanJ = J.reduce((a, b) => a + b, 0) / Math.max(J.length, 1);
+    if (meanJ > 0) J = J.map(j => -j);
+    updateChart(V, J.map(j => -j));
+    schedulePreview(0);
+}
+
+function schedulePreview(delay = 140) {
+    window.clearTimeout(previewTimer);
+    if (!currentCSV) return;
+    previewTimer = window.setTimeout(runPreview, delay);
+}
+
+async function runPreview() {
+    if (!currentCSV) return;
+    if (previewController) previewController.abort();
+    previewController = new AbortController();
+    const { params, bounds } = getCurrentParams();
+
+    try {
+        const res = await fetch('/api/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ csv: currentCSV, params, bounds }),
+            signal: previewController.signal
+        });
+        const data = await res.json();
+        if (!data.success) return;
+        updateChart(data.V, data.J_exp, data.J_fit);
+        setResultText(data, '[预览] ');
+    } catch (err) {
+        if (err.name !== 'AbortError') {
+            console.warn('Preview failed:', err);
+        }
+    }
 }
 
 document.getElementById('csvFile').addEventListener('change', function(e) {
@@ -161,77 +293,45 @@ document.getElementById('csvFile').addEventListener('change', function(e) {
     if (!file) return;
     document.getElementById('fileName').textContent = file.name;
     const reader = new FileReader();
-    reader.onload = function(e) {
-        currentCSV = e.target.result;
-        const lines = currentCSV.split('\n').filter(l => l.trim());
-        const data = [];
-        
-        // 解析数据，跳过表头
-        for (let i = 1; i < lines.length; i++) {
-            const parts = lines[i].split(',').map(v => parseFloat(v.trim()));
-            if (!isNaN(parts[0]) && !isNaN(parts[1])) {
-                data.push(parts);
-            }
-        }
-        
-        const V = data.map(d => d[0]);
-        let J = data.map(d => d[1]);
-        
-        // 按照原始tkinter代码的逻辑处理
-        const meanJ = J.reduce((a, b) => a + b, 0) / J.length;
-        if (meanJ > 0) {
-            J = J.map(j => -j);
-        }
-        // 绘图时再取反（按照原始代码的方式）
-        updateChart(V, J.map(j => -j));
+    reader.onload = function(event) {
+        currentCSV = event.target.result;
+        parseAndPreviewUploadedCsv();
     };
     reader.readAsText(file);
 });
 
 document.getElementById('fitBtn').addEventListener('click', async function() {
     if (!currentCSV) {
-        alert('请先导入 CSV 文件！');
+        alert('请先导入 CSV 文件。');
         return;
     }
-    const { params, fixed } = getCurrentParams();
+    const { params, bounds, fixed } = getCurrentParams();
     const options = {
         use_global: document.getElementById('useGlobal').checked,
         use_nelder: document.getElementById('useNelder').checked,
         use_log: document.getElementById('useLog').checked
     };
+
     const btn = document.getElementById('fitBtn');
     const progress = document.getElementById('progress');
     btn.disabled = true;
     btn.textContent = '拟合中...';
     progress.classList.remove('hidden');
+
     try {
         const res = await fetch('/api/fit', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ csv: currentCSV, params, fixed, options })
+            body: JSON.stringify({ csv: currentCSV, params, bounds, fixed, options })
         });
         const data = await res.json();
         if (data.success) {
             lastResult = data;
             updateChart(data.V, data.J_exp, data.J_fit);
-            let resultText = `RMSE: ${data.rmse.toFixed(5)}\n\n`;
-            for (const [name, val] of Object.entries(data.params)) {
-                resultText += `${name}: ${val.toExponential(4)}`;
-                if (data.fixed && data.fixed[name]) resultText += ' [锁]';
-                resultText += '\n';
-            }
-            document.getElementById('resultContainer').textContent = resultText;
+            setResultText(data);
+            updateInputsFromParams(data.params);
             document.getElementById('exportParams').disabled = false;
             document.getElementById('exportCSV').disabled = false;
-            for (const [name, val] of Object.entries(data.params)) {
-                const bounds = paramBounds[name];
-                const slider = document.getElementById(`slider-${name}`);
-                const valInput = document.getElementById(`val-${name}`);
-                let sliderVal = val;
-                if (bounds.log) sliderVal = Math.log10(val);
-                slider.value = sliderVal;
-                valInput.value = bounds.log ? val.toExponential(2) : val.toFixed(4);
-            }
         } else {
             alert('拟合失败: ' + data.error);
         }
@@ -247,7 +347,7 @@ document.getElementById('fitBtn').addEventListener('click', async function() {
 document.getElementById('exportParams').addEventListener('click', function() {
     if (!lastResult) return;
     const text = document.getElementById('resultContainer').textContent;
-    const blob = new Blob([text], { type: 'text/plain' });
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -262,7 +362,7 @@ document.getElementById('exportCSV').addEventListener('click', function() {
     for (let i = 0; i < lastResult.V.length; i++) {
         csv += `${lastResult.V[i]},${lastResult.J_exp[i]},${lastResult.J_fit[i]}\n`;
     }
-    const blob = new Blob([csv], { type: 'text/csv' });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

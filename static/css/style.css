@@ -6,7 +6,7 @@
 
 body {
     font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: #eef2f7;
     min-height: 100vh;
     padding: 20px;
     color: #333;
@@ -51,7 +51,7 @@ header h1 {
 
 .card {
     background: white;
-    border-radius: 16px;
+    border-radius: 8px;
     padding: 20px;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
 }
@@ -59,7 +59,7 @@ header h1 {
 .card h2 {
     font-size: 1.1rem;
     margin-bottom: 16px;
-    color: #667eea;
+    color: #1f3a5f;
     font-weight: 600;
 }
 
@@ -67,7 +67,7 @@ header h1 {
     display: block;
     width: 100%;
     padding: 14px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: #2457a6;
     color: white;
     border: none;
     border-radius: 10px;
@@ -79,7 +79,7 @@ header h1 {
 
 .btn-upload:hover {
     transform: translateY(-2px);
-    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+    box-shadow: 0 6px 20px rgba(36, 87, 166, 0.25);
 }
 
 #csvFile {
@@ -100,8 +100,9 @@ header h1 {
 }
 
 .param-item {
-    background: #f8f9ff;
-    border-radius: 12px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
     padding: 12px;
 }
 
@@ -115,6 +116,18 @@ header h1 {
 .param-name {
     font-weight: 600;
     color: #444;
+}
+
+.param-live-value {
+    min-height: 22px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 0.95rem;
+    color: #0f172a;
+    background: #eaf1fb;
+    border: 1px solid #d7e3f3;
+    border-radius: 6px;
+    padding: 4px 8px;
+    overflow-wrap: anywhere;
 }
 
 .param-locks {
@@ -153,6 +166,12 @@ header h1 {
     margin-bottom: 2px;
 }
 
+.param-input span {
+    font-size: 0.75rem;
+    color: #64748b;
+    margin-bottom: 2px;
+}
+
 .param-input input {
     padding: 6px 8px;
     border: 1px solid #ddd;
@@ -171,13 +190,13 @@ header h1 {
 .checkbox-label input {
     width: 18px;
     height: 18px;
-    accent-color: #667eea;
+    accent-color: #2457a6;
 }
 
 .btn-primary {
     width: 100%;
     padding: 14px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: #2457a6;
     color: white;
     border: none;
     border-radius: 10px;
@@ -190,7 +209,7 @@ header h1 {
 
 .btn-primary:hover:not(:disabled) {
     transform: translateY(-2px);
-    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+    box-shadow: 0 6px 20px rgba(36, 87, 166, 0.25);
 }
 
 .btn-primary:disabled {
@@ -207,9 +226,9 @@ header h1 {
 
 .btn-secondary {
     padding: 10px;
-    background: #f0f2ff;
-    color: #667eea;
-    border: 2px solid #667eea;
+    background: #edf4ff;
+    color: #2457a6;
+    border: 2px solid #2457a6;
     border-radius: 8px;
     cursor: pointer;
     font-weight: 600;
@@ -217,7 +236,7 @@ header h1 {
 }
 
 .btn-secondary:hover:not(:disabled) {
-    background: #667eea;
+    background: #2457a6;
     color: white;
 }
 
@@ -237,7 +256,7 @@ header h1 {
 
 .progress-fill {
     height: 100%;
-    background: linear-gradient(90deg, #667eea, #764ba2);
+    background: #2457a6;
     width: 0%;
     transition: width 0.3s;
 }
@@ -247,7 +266,7 @@ header h1 {
 }
 
 .result-box {
-    background: #f8f9ff;
+    background: #f8fafc;
     border-radius: 10px;
     padding: 14px;
     min-height: 120px;
@@ -264,7 +283,7 @@ header h1 {
 
 .content-area {
     background: white;
-    border-radius: 16px;
+    border-radius: 8px;
     padding: 24px;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
 }
