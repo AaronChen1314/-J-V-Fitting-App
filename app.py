@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, render_template, request
-from flask_cors import CORS
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 import io
+from pathlib import Path
 import warnings
 
 import numpy as np
@@ -9,25 +10,46 @@ from scipy.constants import e as q_e, k as k_B
 from scipy.optimize import differential_evolution, fsolve, least_squares, minimize
 
 app = Flask(__name__)
-CORS(app)
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
 
 T = 300.0
 Vt = (k_B * T) / q_e
 
 PARAM_NAMES = ["Jph", "J01", "J02", "n1", "n2", "Rs", "Rsh"]
 LOG_PARAMS = {"J01", "J02"}
+BASE_DIR = Path(__file__).resolve().parent
+SAMPLE_FILES = {
+    "nbg": BASE_DIR / "钙钙" / "0-1-nbg真实.csv",
+    "wbg": BASE_DIR / "钙钙" / "0-1-wbg-真实.csv",
+}
 
 
 @app.errorhandler(Exception)
 def handle_exception(error):
     if request.path.startswith("/api/"):
-        status = 400 if isinstance(error, ValueError) else 500
-        return jsonify({"success": False, "error": str(error)}), status
+        if isinstance(error, RequestEntityTooLarge):
+            return jsonify({"success": False, "error": "请求内容超过 2 MB 限制。"}), 413
+        if isinstance(error, ValueError):
+            return jsonify({"success": False, "error": str(error)}), 400
+        if isinstance(error, HTTPException):
+            return jsonify({"success": False, "error": error.description}), error.code
+        app.logger.exception("Unhandled API error")
+        return jsonify({"success": False, "error": "服务器处理请求失败。"}), 500
     raise error
 
 
-def double_diode_model(V_array, Jph, J01, J02, n1, n2, Rs, Rsh):
+@app.after_request
+def set_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "same-origin"
+    return response
+
+
+def double_diode_model(V_array, Jph, J01, J02, n1, n2, Rs, Rsh, return_diagnostics=False):
     J_calc = []
+    converged = []
+    residuals = []
     Jph_A = float(Jph) * 1e-3
     J01_A = float(J01) * 1e-3
     J02_A = float(J02) * 1e-3
@@ -50,23 +72,49 @@ def double_diode_model(V_array, Jph, J01, J02, n1, n2, Rs, Rsh):
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
-                J_solution, = fsolve(equation_to_solve, current_guess, xtol=1e-8, maxfev=80)
-            if not np.isfinite(J_solution):
+                solution, info, ier, _ = fsolve(
+                    equation_to_solve, current_guess, xtol=1e-8, maxfev=80, full_output=True
+                )
+            J_solution = float(solution[0])
+            residual = abs(float(np.asarray(equation_to_solve(J_solution)).item()))
+            is_converged = bool(ier == 1 and np.isfinite(J_solution) and residual <= 1e-7)
+            if not is_converged:
                 J_solution = current_guess
         except Exception:
             J_solution = current_guess
+            residual = float("inf")
+            is_converged = False
         current_guess = J_solution
         J_calc.append(J_solution)
-    return np.array(J_calc) * 1e3
+        converged.append(is_converged)
+        residuals.append(residual)
+
+    model = np.array(J_calc) * 1e3
+    if not return_diagnostics:
+        return model
+    finite_residuals = [value for value in residuals if np.isfinite(value)]
+    diagnostics = {
+        "points": len(J_calc),
+        "converged_points": int(np.count_nonzero(converged)),
+        "failed_points": int(len(J_calc) - np.count_nonzero(converged)),
+        "max_equation_residual": max(finite_residuals, default=None),
+        "converged_mask": np.asarray(converged, dtype=bool),
+    }
+    return model, diagnostics
 
 
 def parse_jv_csv(csv_content):
-    if not csv_content:
-        raise ValueError("CSV content is empty.")
+    if not isinstance(csv_content, str) or not csv_content.strip():
+        raise ValueError("CSV 内容为空。")
+    if len(csv_content.encode("utf-8")) > 1_500_000:
+        raise ValueError("CSV 内容超过 1.5 MB 限制。")
 
-    df = pd.read_csv(io.StringIO(csv_content))
+    try:
+        df = pd.read_csv(io.StringIO(csv_content))
+    except Exception as error:
+        raise ValueError("CSV 无法解析，请检查分隔符和文件编码。") from error
     if df.shape[1] < 2:
-        raise ValueError("CSV must contain at least voltage and current columns.")
+        raise ValueError("CSV 至少需要电压和电流两列。")
 
     cols = [str(c).strip().lower() for c in df.columns]
     v_candidates = [i for i, c in enumerate(cols) if "volt" in c or c == "v"]
@@ -84,11 +132,17 @@ def parse_jv_csv(csv_content):
     V_data = V_data[mask]
     J_data_mA = J_data_mA[mask]
     if len(V_data) < 3:
-        raise ValueError("At least 3 valid V-J data points are required.")
+        raise ValueError("至少需要 3 个有效的 V-J 数据点。")
 
     order = np.argsort(V_data)
     V_data = V_data[order]
     J_data_mA = J_data_mA[order]
+    if len(np.unique(V_data)) < len(V_data):
+        grouped = pd.DataFrame({"V": V_data, "J": J_data_mA}).groupby("V", as_index=False).mean()
+        V_data = grouped["V"].to_numpy()
+        J_data_mA = grouped["J"].to_numpy()
+    if len(V_data) < 3:
+        raise ValueError("合并重复电压后，至少需要 3 个不同电压点。")
 
     # Internal convention follows the original V5 script: illuminated current is negative.
     if np.nanmean(J_data_mA) > 0:
@@ -184,19 +238,22 @@ def build_fit_inputs(V_data, J_data_mA, request_params, request_bounds):
         try:
             lo = float(item_bounds.get("min", lo))
             hi = float(item_bounds.get("max", hi))
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} 的参数边界不是有效数字。") from error
 
         if name in LOG_PARAMS:
             lo = max(lo, 1e-30)
-            hi = max(hi, lo * 10)
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            raise ValueError(f"{name} 的参数边界必须是有限数字。")
         if hi <= lo:
-            hi = lo + max(abs(lo), 1.0)
+            raise ValueError(f"{name} 的最大值必须大于最小值。")
 
         try:
             val = float(request_params.get(name, defaults[name]))
-        except (TypeError, ValueError):
-            val = defaults[name]
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} 的初始值不是有效数字。") from error
+        if not np.isfinite(val):
+            raise ValueError(f"{name} 的初始值必须是有限数字。")
         if name in LOG_PARAMS:
             val = max(val, lo)
         p0.append(float(np.clip(val, lo, hi)))
@@ -229,7 +286,8 @@ def rmse(J_data_mA, J_model):
 def residual_values(J_data_mA, J_model, use_log):
     if use_log:
         epsilon = 1e-6
-        return np.log10(np.abs(J_model) + epsilon) - np.log10(np.abs(J_data_mA) + epsilon)
+        signed_log = lambda values: np.sign(values) * np.log10(1.0 + np.abs(values) / epsilon)
+        return signed_log(J_model) - signed_log(J_data_mA)
     scale = max(float(np.nanmax(np.abs(J_data_mA))), 1.0)
     return (J_model - J_data_mA) / scale
 
@@ -243,8 +301,9 @@ def fit_double_diode(V_data, J_data_mA, params=None, bounds=None, fixed=None, op
     idx_free = np.where(~fixed_flags)[0]
     idx_fixed = np.where(fixed_flags)[0]
     if len(idx_free) == 0:
-        J_final = double_diode_model(V_data, *p0)
-        return p0, J_final, rmse(J_data_mA, J_final), meta
+        J_final, solver = double_diode_model(V_data, *p0, return_diagnostics=True)
+        diagnostics = build_diagnostics(p0, b_min, b_max, solver, {"success": True, "message": "全部参数已锁定。"}, options)
+        return p0, J_final, rmse(J_data_mA, J_final), {**meta, **diagnostics}
 
     free_names = [PARAM_NAMES[i] for i in idx_free]
     p0_free = to_optimizer_space(p0[idx_free], free_names)
@@ -264,8 +323,11 @@ def fit_double_diode(V_data, J_data_mA, params=None, bounds=None, fixed=None, op
 
     def residual_func(params_free):
         p_full = reconstruct_full_params(params_free)
-        J_model = double_diode_model(V_data, *p_full)
-        return residual_values(J_data_mA, J_model, use_log)
+        J_model, solver = double_diode_model(V_data, *p_full, return_diagnostics=True)
+        residuals = residual_values(J_data_mA, J_model, use_log)
+        if solver["failed_points"]:
+            residuals = residuals + np.where(solver["converged_mask"], 0.0, 10.0)
+        return residuals
 
     def cost_func(params_free):
         if np.any(params_free < b_min_free) or np.any(params_free > b_max_free):
@@ -279,8 +341,8 @@ def fit_double_diode(V_data, J_data_mA, params=None, bounds=None, fixed=None, op
             cost_func,
             list(zip(b_min_free, b_max_free)),
             strategy="best1bin",
-            maxiter=int(options.get("global_maxiter", 35)),
-            popsize=int(options.get("global_popsize", 8)),
+            maxiter=bounded_int(options.get("global_maxiter"), 35, 1, 100),
+            popsize=bounded_int(options.get("global_popsize"), 8, 3, 20),
             workers=1,
             polish=False,
             updating="immediate",
@@ -293,7 +355,11 @@ def fit_double_diode(V_data, J_data_mA, params=None, bounds=None, fixed=None, op
             final_params_free,
             method="Nelder-Mead",
             tol=1e-5,
-            options={"maxiter": int(options.get("nelder_maxiter", 900)), "xatol": 1e-5, "fatol": 1e-5},
+            options={
+                "maxiter": bounded_int(options.get("nelder_maxiter"), 900, 10, 3000),
+                "xatol": 1e-5,
+                "fatol": 1e-5,
+            },
         )
         final_params_free = np.clip(res.x, b_min_free, b_max_free)
 
@@ -302,15 +368,69 @@ def fit_double_diode(V_data, J_data_mA, params=None, bounds=None, fixed=None, op
         final_params_free,
         bounds=(b_min_free, b_max_free),
         loss="linear",
-        max_nfev=int(options.get("max_nfev", 2400)),
+        max_nfev=bounded_int(options.get("max_nfev"), 2400, 20, 5000),
         xtol=1e-9,
         ftol=1e-9,
         gtol=1e-9,
     )
     final_params_free = lsq.x
     final_params_full = reconstruct_full_params(final_params_free)
-    J_final = double_diode_model(V_data, *final_params_full)
-    return final_params_full, J_final, rmse(J_data_mA, J_final), meta
+    J_final, solver = double_diode_model(V_data, *final_params_full, return_diagnostics=True)
+    optimizer = {
+        "success": bool(lsq.success),
+        "message": str(lsq.message),
+        "evaluations": int(lsq.nfev),
+        "cost": float(lsq.cost),
+    }
+    diagnostics = build_diagnostics(final_params_full, b_min, b_max, solver, optimizer, options)
+    return final_params_full, J_final, rmse(J_data_mA, J_final), {**meta, **diagnostics}
+
+
+def bounded_int(value, default, minimum, maximum):
+    try:
+        parsed = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        parsed = default
+    return int(np.clip(parsed, minimum, maximum))
+
+
+def build_diagnostics(params, b_min, b_max, solver, optimizer, options):
+    boundary_hits = []
+    for name, value, lower, upper in zip(PARAM_NAMES, params, b_min, b_max):
+        if name in LOG_PARAMS:
+            value, lower, upper = np.log10([max(value, 1e-30), max(lower, 1e-30), max(upper, 1e-30)])
+        span = max(upper - lower, 1e-30)
+        if abs(value - lower) <= span * 1e-4 or abs(value - upper) <= span * 1e-4:
+            boundary_hits.append(name)
+    warnings_list = []
+    if solver["failed_points"]:
+        warnings_list.append(f"{solver['failed_points']} 个电压点的电流方程未可靠收敛。")
+    if boundary_hits:
+        warnings_list.append("以下参数触及边界：" + ", ".join(boundary_hits))
+    if not optimizer.get("success", False):
+        warnings_list.append("优化器未报告收敛，请谨慎使用结果。")
+    mode = "对数残差" if options.get("use_log") else "线性残差"
+    stages = ["最小二乘"]
+    if options.get("use_global"):
+        stages.insert(0, "差分进化")
+    if options.get("use_nelder"):
+        stages.insert(-1, "Nelder-Mead")
+    return {
+        "mode": mode,
+        "stages": stages,
+        "quality": "warning" if warnings_list else "good",
+        "warnings": warnings_list,
+        "boundary_hits": boundary_hits,
+        "solver": {key: value for key, value in solver.items() if key != "converged_mask"},
+        "optimizer": optimizer,
+    }
+
+
+def get_json_payload():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise ValueError("请求正文必须是 JSON 对象。")
+    return data
 
 
 @app.route("/")
@@ -318,12 +438,39 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/samples", methods=["GET"])
+def samples():
+    return jsonify({
+        "success": True,
+        "samples": [
+            {"id": "nbg", "name": "NBG sample"},
+            {"id": "wbg", "name": "WBG sample"},
+        ],
+    })
+
+
+@app.route("/api/sample/<sample_id>", methods=["GET"])
+def sample(sample_id):
+    path = SAMPLE_FILES.get(sample_id)
+    if path is None or not path.exists():
+        raise ValueError("Unknown sample dataset.")
+    return jsonify({
+        "success": True,
+        "id": sample_id,
+        "name": "NBG sample" if sample_id == "nbg" else "WBG sample",
+        "csv": path.read_text(encoding="utf-8-sig"),
+    })
+
+
 @app.route("/api/preview", methods=["POST"])
 def preview():
-    data = request.get_json(silent=True) or {}
+    data = get_json_payload()
     V_data, J_data_mA = parse_jv_csv(data.get("csv", ""))
-    p0, _, _, meta = build_fit_inputs(V_data, J_data_mA, data.get("params"), data.get("bounds"))
-    J_preview = double_diode_model(V_data, *p0)
+    p0, b_min, b_max, meta = build_fit_inputs(V_data, J_data_mA, data.get("params"), data.get("bounds"))
+    J_preview, solver = double_diode_model(V_data, *p0, return_diagnostics=True)
+    diagnostics = build_diagnostics(
+        p0, b_min, b_max, solver, {"success": True, "message": "Preview only."}, {}
+    )
     return jsonify({
         "success": True,
         "params": dict(zip(PARAM_NAMES, p0.tolist())),
@@ -331,13 +478,13 @@ def preview():
         "J_exp": (-J_data_mA).tolist(),
         "J_fit": (-J_preview).tolist(),
         "rmse": rmse(J_data_mA, J_preview),
-        "meta": meta,
+        "meta": {**meta, **diagnostics, "mode": "preview", "stages": ["preview"]},
     })
 
 
 @app.route("/api/fit", methods=["POST"])
 def fit():
-    data = request.get_json(silent=True) or {}
+    data = get_json_payload()
     V_data, J_data_mA = parse_jv_csv(data.get("csv", ""))
     params, J_final, fit_rmse, meta = fit_double_diode(
         V_data,

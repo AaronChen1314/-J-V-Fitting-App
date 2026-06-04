@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>光态 J-V 曲线拟合 - 双二极管模型</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <div class="container">
@@ -18,9 +18,14 @@
             <aside class="sidebar">
                 <section class="card">
                     <h2>1. 导入数据</h2>
-                    <input type="file" id="csvFile" accept=".csv">
+                    <input type="file" id="csvFile" accept=".csv,text/csv">
                     <label for="csvFile" class="btn-upload">选择 CSV 文件</label>
-                    <p id="fileName" class="file-name">无文件</p>
+                    <div class="sample-actions">
+                        <button type="button" class="btn-ghost" data-sample="nbg">NBG 示例</button>
+                        <button type="button" class="btn-ghost" data-sample="wbg">WBG 示例</button>
+                    </div>
+                    <p id="fileName" class="file-name">未选择文件</p>
+                    <div id="statusBox" class="status-box" role="status">等待导入数据</div>
                 </section>
 
                 <section class="card">
@@ -32,7 +37,7 @@
                     <h2>3. 拟合策略</h2>
                     <label class="checkbox-label">
                         <input type="checkbox" id="useGlobal">
-                        <span>启用全局优化 (DE)</span>
+                        <span>差分进化全局搜索</span>
                     </label>
                     <label class="checkbox-label">
                         <input type="checkbox" id="useNelder">
@@ -40,25 +45,36 @@
                     </label>
                     <label class="checkbox-label">
                         <input type="checkbox" id="useLog">
-                        <span>对数空间候选 + 自动择优</span>
+                        <span>有符号对数残差</span>
                     </label>
-                    <button id="fitBtn" class="btn-primary">开始拟合</button>
-                    <div id="progress" class="progress-bar hidden">
-                        <div class="progress-fill"></div>
+                    <div class="fit-actions">
+                        <button id="fitBtn" class="btn-primary">开始正式拟合</button>
+                        <button id="cancelFitBtn" class="btn-danger hidden">取消拟合</button>
                     </div>
+                    <div id="progress" class="progress-bar hidden" aria-label="拟合进度">
+                        <div id="progressFill" class="progress-fill"></div>
+                    </div>
+                    <p id="progressText" class="progress-text hidden"></p>
                 </section>
 
                 <section class="card">
-                    <h2>4. 结果</h2>
+                    <h2>4. 结果与诊断</h2>
+                    <div id="qualityBox" class="quality-box hidden"></div>
                     <div id="resultContainer" class="result-box">等待导入数据...</div>
                     <div class="btn-group">
-                        <button id="exportParams" class="btn-secondary" disabled>导出参数</button>
+                        <button id="exportParams" class="btn-secondary" disabled>导出诊断</button>
                         <button id="exportCSV" class="btn-secondary" disabled>导出 CSV</button>
                     </div>
                 </section>
             </aside>
 
             <main class="content-area">
+                <section class="metrics-strip" aria-label="拟合摘要">
+                    <div class="metric"><span>RMSE</span><strong id="metricRmse">--</strong></div>
+                    <div class="metric"><span>Jsc (V≈0)</span><strong id="metricJsc">--</strong></div>
+                    <div class="metric"><span>Voc</span><strong id="metricVoc">--</strong></div>
+                    <div class="metric"><span>质量</span><strong id="metricMode">--</strong></div>
+                </section>
                 <div class="chart-container">
                     <canvas id="jvChart"></canvas>
                 </div>

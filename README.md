@@ -6,9 +6,10 @@
 
 - 📊 导入 CSV 数据文件
 - 🎛️ 可调参数设置（支持参数锁定）
-- 🔧 多种拟合策略（全局优化、Nelder-Mead、对数空间）
+- 🔧 SciPy 权威拟合引擎（差分进化、Nelder-Mead、最小二乘）
 - 📈 实时图表可视化
-- 💾 结果导出（参数文本和 CSV）
+- ✅ 求解收敛、参数触界与优化状态诊断
+- 💾 结果导出（完整诊断 JSON 和 CSV）
 
 ## 本地运行
 
@@ -21,6 +22,12 @@ python app.py
 ```
 
 访问 http://localhost:5000
+
+## 测试
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## CSV 格式
 

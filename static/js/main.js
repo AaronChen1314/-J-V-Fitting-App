@@ -3,41 +3,29 @@ let currentCSV = null;
 let lastResult = null;
 let previewTimer = null;
 let previewController = null;
-let fitWorker = null;
+let fitController = null;
+let progressTimer = null;
+let needsInitialGuess = false;
 
-const defaultParams = {
-    Jph: 10,
-    J01: 1e-12,
-    J02: 1e-8,
-    n1: 1.0,
-    n2: 2.0,
-    Rs: 1.0,
-    Rsh: 2000
-};
-
+const defaultParams = { Jph: 10, J01: 1e-12, J02: 1e-8, n1: 1, n2: 2, Rs: 1, Rsh: 2000 };
 const paramBounds = {
     Jph: { min: 0, max: 50, step: 0.01 },
     J01: { min: 1e-20, max: 1e-5, step: 0.05, log: true },
     J02: { min: 1e-15, max: 1e-3, step: 0.05, log: true },
-    n1: { min: 0.5, max: 2.0, step: 0.001 },
-    n2: { min: 1.0, max: 4.0, step: 0.001 },
+    n1: { min: 0.5, max: 2, step: 0.001 },
+    n2: { min: 1, max: 4, step: 0.001 },
     Rs: { min: 0.01, max: 100, step: 0.01 },
     Rsh: { min: 10, max: 1e6, step: 1 }
 };
+const paramLabels = { Jph: 'Jph / Jsc', J01: 'J01', J02: 'J02', n1: 'n1', n2: 'n2', Rs: 'Rs', Rsh: 'Rsh' };
 
-const paramLabels = {
-    Jph: 'Jph / Jsc',
-    J01: 'J01',
-    J02: 'J02',
-    n1: 'n1',
-    n2: 'n2',
-    Rs: 'Rs',
-    Rsh: 'Rsh'
-};
+function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+}
 
 function formatValue(name, value) {
-    if (!Number.isFinite(value)) return '';
-    if (paramBounds[name]?.log || Math.abs(value) >= 1e4 || Math.abs(value) < 1e-3) {
+    if (!Number.isFinite(value)) return '--';
+    if (paramBounds[name]?.log || Math.abs(value) >= 1e4 || (Math.abs(value) > 0 && Math.abs(value) < 1e-3)) {
         return value.toExponential(4);
     }
     return value.toFixed(name === 'Rsh' ? 2 : 4);
@@ -48,57 +36,42 @@ function valueToSlider(name, value) {
 }
 
 function sliderToValue(name, value) {
-    return paramBounds[name].log ? Math.pow(10, value) : value;
+    return paramBounds[name].log ? 10 ** value : value;
 }
 
-function clamp(value, min, max) {
-    return Math.min(Math.max(value, min), max);
+function setStatus(message, kind = 'idle') {
+    const box = document.getElementById('statusBox');
+    box.textContent = message;
+    box.dataset.kind = kind;
 }
 
 function initParams() {
     const container = document.getElementById('paramContainer');
-    container.innerHTML = '';
-
-    for (const [name, val] of Object.entries(defaultParams)) {
+    for (const [name, value] of Object.entries(defaultParams)) {
         const bounds = paramBounds[name];
-        const div = document.createElement('div');
-        div.className = 'param-item';
-        div.innerHTML = `
+        const item = document.createElement('div');
+        item.className = 'param-item';
+        item.innerHTML = `
             <div class="param-header">
                 <span class="param-name">${paramLabels[name]}</span>
-                <label class="fixed-checkbox">
-                    <input type="checkbox" id="fixed-${name}">
-                    <span>锁定</span>
-                </label>
+                <label class="fixed-checkbox"><input type="checkbox" id="fixed-${name}"><span>锁定</span></label>
             </div>
-            <div class="param-live-value" id="live-${name}">${formatValue(name, val)}</div>
+            <div class="param-live-value" id="live-${name}">${formatValue(name, value)}</div>
             <input type="range" class="param-slider" id="slider-${name}">
             <div class="param-inputs">
-                <label class="param-input">
-                    <span>Min</span>
-                    <input type="number" id="min-${name}" value="${bounds.min}" step="any">
-                </label>
-                <label class="param-input">
-                    <span>Max</span>
-                    <input type="number" id="max-${name}" value="${bounds.max}" step="any">
-                </label>
-                <label class="param-input">
-                    <span>Val</span>
-                    <input type="number" id="val-${name}" value="${val}" step="any">
-                </label>
-            </div>
-        `;
-        container.appendChild(div);
+                <label class="param-input"><span>Min</span><input type="number" id="min-${name}" value="${bounds.min}" step="any"></label>
+                <label class="param-input"><span>Max</span><input type="number" id="max-${name}" value="${bounds.max}" step="any"></label>
+                <label class="param-input"><span>Val</span><input type="number" id="val-${name}" value="${value}" step="any"></label>
+            </div>`;
+        container.appendChild(item);
 
         const slider = document.getElementById(`slider-${name}`);
         slider.min = bounds.log ? Math.log10(bounds.min) : bounds.min;
         slider.max = bounds.log ? Math.log10(bounds.max) : bounds.max;
         slider.step = bounds.step;
-        slider.value = valueToSlider(name, val);
-
+        slider.value = valueToSlider(name, value);
         slider.addEventListener('input', () => {
-            const value = sliderToValue(name, parseFloat(slider.value));
-            setParamValue(name, value, false);
+            setParamValue(name, sliderToValue(name, Number(slider.value)), false);
             schedulePreview();
         });
         document.getElementById(`val-${name}`).addEventListener('input', () => {
@@ -111,36 +84,30 @@ function initParams() {
 }
 
 function setParamValue(name, value, updateSlider = true) {
-    const min = parseFloat(document.getElementById(`min-${name}`).value);
-    const max = parseFloat(document.getElementById(`max-${name}`).value);
+    const min = Number(document.getElementById(`min-${name}`).value);
+    const max = Number(document.getElementById(`max-${name}`).value);
     const safeValue = clamp(value, min, max);
     document.getElementById(`val-${name}`).value = safeValue;
     document.getElementById(`live-${name}`).textContent = formatValue(name, safeValue);
-    if (updateSlider) {
-        document.getElementById(`slider-${name}`).value = valueToSlider(name, safeValue);
-    }
+    if (updateSlider) document.getElementById(`slider-${name}`).value = valueToSlider(name, safeValue);
 }
 
 function syncSliderFromValue(name) {
-    const value = parseFloat(document.getElementById(`val-${name}`).value);
-    if (Number.isFinite(value)) setParamValue(name, value, true);
+    const value = Number(document.getElementById(`val-${name}`).value);
+    if (Number.isFinite(value)) setParamValue(name, value);
 }
 
 function updateBoundsForParam(name) {
     const slider = document.getElementById(`slider-${name}`);
-    let min = parseFloat(document.getElementById(`min-${name}`).value);
-    let max = parseFloat(document.getElementById(`max-${name}`).value);
+    let min = Number(document.getElementById(`min-${name}`).value);
+    let max = Number(document.getElementById(`max-${name}`).value);
     if (!Number.isFinite(min)) min = paramBounds[name].min;
     if (!Number.isFinite(max)) max = paramBounds[name].max;
-    if (paramBounds[name].log) {
-        min = Math.max(min, 1e-30);
-        max = Math.max(max, min * 10);
-    }
-    if (max <= min) max = min + Math.max(Math.abs(min), 1);
+    if (paramBounds[name].log) min = Math.max(min, 1e-30);
     document.getElementById(`min-${name}`).value = min;
     document.getElementById(`max-${name}`).value = max;
-    slider.min = paramBounds[name].log ? Math.log10(min) : min;
-    slider.max = paramBounds[name].log ? Math.log10(max) : max;
+    slider.min = valueToSlider(name, min);
+    slider.max = valueToSlider(name, Math.max(max, min));
     syncSliderFromValue(name);
     schedulePreview();
 }
@@ -150,304 +117,226 @@ function getCurrentParams() {
     const bounds = {};
     const fixed = {};
     for (const name of Object.keys(defaultParams)) {
-        params[name] = parseFloat(document.getElementById(`val-${name}`).value);
+        params[name] = Number(document.getElementById(`val-${name}`).value);
         bounds[name] = {
-            min: parseFloat(document.getElementById(`min-${name}`).value),
-            max: parseFloat(document.getElementById(`max-${name}`).value)
+            min: Number(document.getElementById(`min-${name}`).value),
+            max: Number(document.getElementById(`max-${name}`).value)
         };
         fixed[name] = document.getElementById(`fixed-${name}`).checked;
     }
     return { params, bounds, fixed };
 }
 
-async function parseApiResponse(res) {
-    const contentType = res.headers.get('content-type') || '';
-    const text = await res.text();
-    if (contentType.includes('application/json')) {
-        try {
-            return JSON.parse(text);
-        } catch (err) {
-            throw new Error(`服务器返回的 JSON 无法解析：${err.message}`);
-        }
-    }
-    const plain = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-    throw new Error(plain ? plain.slice(0, 240) : `服务器返回 ${res.status}`);
+async function parseApiResponse(response) {
+    const data = await response.json().catch(() => null);
+    if (!data) throw new Error(`服务器返回无法解析的响应 (${response.status})`);
+    if (!response.ok || !data.success) throw new Error(data.error || `请求失败 (${response.status})`);
+    return data;
 }
 
 function initChart() {
-    const ctx = document.getElementById('jvChart').getContext('2d');
-    chart = new Chart(ctx, {
+    chart = new Chart(document.getElementById('jvChart'), {
         type: 'scatter',
-        data: {
-            datasets: [
-                {
-                    label: '实验数据',
-                    data: [],
-                    borderColor: '#2563eb',
-                    backgroundColor: 'rgba(37, 99, 235, 0.75)',
-                    pointRadius: 4,
-                    pointHoverRadius: 6,
-                    showLine: false,
-                    fill: false
-                },
-                {
-                    label: '模型曲线',
-                    data: [],
-                    borderColor: '#dc2626',
-                    backgroundColor: 'rgba(220, 38, 38, 0.1)',
-                    borderWidth: 2,
-                    pointRadius: 0,
-                    showLine: true,
-                    fill: false
-                }
-            ]
-        },
+        data: { datasets: [
+            { label: '实验数据', data: [], borderColor: '#2563eb', backgroundColor: '#2563eb', pointRadius: 4 },
+            { label: '模型曲线', data: [], borderColor: '#dc2626', backgroundColor: '#dc2626', borderWidth: 2, pointRadius: 0, showLine: true }
+        ]},
         options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            animation: false,
-            plugins: {
-                title: { display: true, text: 'J-V Curve Analysis', font: { size: 18, weight: 'bold' } },
-                legend: { position: 'top' }
-            },
+            responsive: true, maintainAspectRatio: false, animation: false,
+            plugins: { title: { display: true, text: 'J-V Curve Analysis' }, legend: { position: 'top' } },
             scales: {
-                x: {
-                    type: 'linear',
-                    position: 'bottom',
-                    title: { display: true, text: 'Voltage (V)', font: { size: 14 } },
-                    grid: { color: 'rgba(0,0,0,0.06)' }
-                },
-                y: {
-                    type: 'linear',
-                    title: { display: true, text: 'Current Density (mA/cm²)', font: { size: 14 } },
-                    grid: { color: 'rgba(0,0,0,0.06)' }
-                }
+                x: { type: 'linear', title: { display: true, text: 'Voltage (V)' } },
+                y: { type: 'linear', title: { display: true, text: 'Current Density (mA/cm²)' } }
             }
         }
     });
 }
 
-function updateChart(V, JExp, JFit = null) {
-    chart.data.datasets[0].data = V.map((v, i) => ({ x: v, y: JExp[i] }));
-    chart.data.datasets[1].data = JFit ? V.map((v, i) => ({ x: v, y: JFit[i] })) : [];
+function updateChart(V, experimental, fitted = null) {
+    chart.data.datasets[0].data = V.map((x, index) => ({ x, y: experimental[index] }));
+    chart.data.datasets[1].data = fitted ? V.map((x, index) => ({ x, y: fitted[index] })) : [];
     chart.update('none');
 }
 
+function updateMetrics(data = null) {
+    document.getElementById('metricRmse').textContent = data?.rmse != null ? data.rmse.toFixed(6) : '--';
+    document.getElementById('metricJsc').textContent = data?.meta?.Jsc != null ? formatValue('Jph', data.meta.Jsc) : '--';
+    document.getElementById('metricVoc').textContent = data?.meta?.Voc != null ? `${data.meta.Voc.toFixed(4)} V` : '--';
+    document.getElementById('metricMode').textContent = data?.meta?.quality === 'good' ? '可靠' : data?.meta?.quality === 'warning' ? '需复核' : '--';
+}
+
+function updateQuality(meta = {}) {
+    const box = document.getElementById('qualityBox');
+    const warnings = meta.warnings || [];
+    box.classList.toggle('hidden', !warnings.length);
+    box.dataset.kind = warnings.length ? 'warning' : 'good';
+    box.textContent = warnings.join('\n');
+}
+
 function setResultText(data, prefix = '') {
-    let resultText = `${prefix}RMSE: ${data.rmse.toFixed(6)}\n\n`;
-    if (data.meta?.Jsc) resultText += `Jsc(V≈0): ${formatValue('Jph', data.meta.Jsc)}\n`;
-    if (data.meta?.Voc) resultText += `Voc: ${data.meta.Voc.toFixed(4)} V\n`;
-    if (data.meta?.mode) resultText += `Mode: ${data.meta.mode}\n`;
-    if (data.meta?.candidates?.length) {
-        resultText += `Candidates: ${data.meta.candidates.map(c => `${c.mode} RMSE=${c.rmse.toFixed(4)}`).join('; ')}\n`;
+    const meta = data.meta || {};
+    const lines = [
+        `${prefix}RMSE: ${data.rmse.toFixed(6)}`,
+        `模式: ${meta.mode || '--'}`,
+        `阶段: ${(meta.stages || []).join(' → ') || '--'}`,
+        `求解收敛点: ${meta.solver?.converged_points ?? '--'} / ${meta.solver?.points ?? '--'}`,
+        `优化评估次数: ${meta.optimizer?.evaluations ?? '--'}`,
+        ''
+    ];
+    for (const [name, value] of Object.entries(data.params)) {
+        lines.push(`${name}: ${formatValue(name, value)}${data.fixed?.[name] ? ' [锁定]' : ''}`);
     }
-    resultText += '\n';
-    for (const [name, val] of Object.entries(data.params)) {
-        resultText += `${name}: ${formatValue(name, val)}`;
-        if (data.fixed && data.fixed[name]) resultText += ' [锁定]';
-        resultText += '\n';
-    }
-    document.getElementById('resultContainer').textContent = resultText;
+    if (meta.warnings?.length) lines.push('', '警告:', ...meta.warnings.map(item => `- ${item}`));
+    document.getElementById('resultContainer').textContent = lines.join('\n');
+    updateMetrics(data);
+    updateQuality(meta);
 }
 
 function updateInputsFromParams(params) {
-    for (const [name, val] of Object.entries(params)) {
-        setParamValue(name, val, true);
-    }
-}
-
-function estimateJscFromRows(rows) {
-    if (!rows.length) return null;
-    const sorted = [...rows].sort((a, b) => a[0] - b[0]);
-    let J = sorted.map(row => row[1]);
-    const meanJ = J.reduce((a, b) => a + b, 0) / J.length;
-    if (meanJ > 0) J = J.map(j => -j);
-    for (let i = 0; i < sorted.length; i++) {
-        if (Math.abs(sorted[i][0]) < 1e-12) return Math.max(-J[i], 1e-9);
-    }
-    for (let i = 0; i < sorted.length - 1; i++) {
-        const v1 = sorted[i][0];
-        const v2 = sorted[i + 1][0];
-        if (v1 <= 0 && v2 >= 0 && v2 !== v1) {
-            const j0 = J[i] + (0 - v1) * (J[i + 1] - J[i]) / (v2 - v1);
-            return Math.max(-j0, 1e-9);
-        }
-    }
-    const nearest = sorted.map((row, i) => ({ distance: Math.abs(row[0]), value: J[i] })).sort((a, b) => a.distance - b.distance)[0];
-    return nearest ? Math.max(-nearest.value, 1e-9) : null;
-}
-
-function applyJscInitialGuess(jsc) {
-    if (!Number.isFinite(jsc) || jsc <= 0) return;
-    document.getElementById('min-Jph').value = Math.max(jsc * 0.75, 1e-9);
-    document.getElementById('max-Jph').value = Math.max(jsc * 1.25, jsc + 1e-6);
-    updateBoundsForParam('Jph');
-    setParamValue('Jph', jsc, true);
+    for (const [name, value] of Object.entries(params)) setParamValue(name, value);
 }
 
 function parseAndPreviewUploadedCsv() {
-    const lines = currentCSV.split(/\r?\n/).filter(line => line.trim());
-    const data = [];
-    for (let i = 1; i < lines.length; i++) {
-        const parts = lines[i].split(',').map(v => parseFloat(v.trim()));
-        if (Number.isFinite(parts[0]) && Number.isFinite(parts[1])) data.push(parts);
-    }
-    const V = data.map(d => d[0]);
-    let J = data.map(d => d[1]);
-    const meanJ = J.reduce((a, b) => a + b, 0) / Math.max(J.length, 1);
-    if (meanJ > 0) J = J.map(j => -j);
-    updateChart(V, J.map(j => -j));
-    applyJscInitialGuess(estimateJscFromRows(data));
+    needsInitialGuess = true;
+    setStatus('正在由后端校验并解析数据...', 'running');
     schedulePreview(0);
 }
 
-function schedulePreview(delay = 180) {
+function schedulePreview(delay = 250) {
     window.clearTimeout(previewTimer);
-    if (!currentCSV) return;
-    previewTimer = window.setTimeout(runPreview, delay);
+    if (currentCSV && !fitController) previewTimer = window.setTimeout(runPreview, delay);
 }
 
 async function runPreview() {
-    if (!currentCSV) return;
-    if (previewController) previewController.abort();
+    if (!currentCSV || fitController) return;
+    previewController?.abort();
     previewController = new AbortController();
     const { params, bounds } = getCurrentParams();
     try {
-        const res = await fetch('/api/preview', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ csv: currentCSV, params, bounds }),
-            signal: previewController.signal
+        const response = await fetch('/api/preview', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ csv: currentCSV, params, bounds }), signal: previewController.signal
         });
-        const data = await parseApiResponse(res);
-        if (!data.success) return;
+        const data = await parseApiResponse(response);
         updateChart(data.V, data.J_exp, data.J_fit);
-        setResultText(data, '[预览] ');
-    } catch (err) {
-        if (err.name !== 'AbortError') console.warn('Preview failed:', err);
-    }
-}
-
-function runLocalFit(payload) {
-    return new Promise((resolve, reject) => {
-        if (typeof Worker === 'undefined') {
-            reject(new Error('当前浏览器不支持 Web Worker，无法保证本地资源计算。请使用 Chrome/Edge/Firefox，或在本机运行 Flask 后重试。'));
-            return;
+        setResultText(data, '[参数预览] ');
+        if (needsInitialGuess && Number.isFinite(data.meta?.Jsc)) {
+            needsInitialGuess = false;
+            const jsc = data.meta.Jsc;
+            document.getElementById('min-Jph').value = Math.max(jsc * 0.75, 1e-9);
+            document.getElementById('max-Jph').value = Math.max(jsc * 1.25, jsc + 1e-6);
+            updateBoundsForParam('Jph');
+            setParamValue('Jph', jsc);
+            schedulePreview(0);
         }
-        if (fitWorker) fitWorker.terminate();
-        fitWorker = new Worker('/static/js/fit-worker.js');
-        const timeout = window.setTimeout(() => {
-            fitWorker.terminate();
-            reject(new Error('本地拟合超时，请缩小参数范围或关闭全局优化后重试。'));
-        }, 120000);
-        fitWorker.onmessage = event => {
-            const { type, message, result, error } = event.data || {};
-            if (type === 'progress' && message) {
-                document.getElementById('resultContainer').textContent = `本地计算中...\n${message}`;
-            }
-            if (type === 'result') {
-                window.clearTimeout(timeout);
-                fitWorker.terminate();
-                fitWorker = null;
-                resolve(result);
-            }
-            if (type === 'error') {
-                window.clearTimeout(timeout);
-                fitWorker.terminate();
-                fitWorker = null;
-                reject(new Error(error || '本地拟合失败'));
-            }
-        };
-        fitWorker.onerror = event => {
-            window.clearTimeout(timeout);
-            fitWorker.terminate();
-            fitWorker = null;
-            reject(new Error(event.message || 'Web Worker 执行失败'));
-        };
-        fitWorker.postMessage({ type: 'fit', payload });
-    });
+        setStatus(`已解析 ${data.V.length} 个数据点，参数预览已更新。`, 'ready');
+    } catch (error) {
+        if (error.name !== 'AbortError') setStatus(`预览失败：${error.message}`, 'error');
+    } finally {
+        previewController = null;
+    }
 }
 
-document.getElementById('csvFile').addEventListener('change', function(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    document.getElementById('fileName').textContent = file.name;
-    const reader = new FileReader();
-    reader.onload = function(event) {
-        currentCSV = event.target.result;
-        parseAndPreviewUploadedCsv();
-    };
-    reader.readAsText(file);
-});
+function setFitRunning(running, options = {}) {
+    const fitButton = document.getElementById('fitBtn');
+    const cancelButton = document.getElementById('cancelFitBtn');
+    document.getElementById('progress').classList.toggle('hidden', !running);
+    document.getElementById('progressText').classList.toggle('hidden', !running);
+    fitButton.disabled = running;
+    fitButton.textContent = running ? '正式拟合中...' : '开始正式拟合';
+    cancelButton.classList.toggle('hidden', !running);
+    window.clearInterval(progressTimer);
+    if (!running) return;
+    const stages = [...(options.use_global ? ['差分进化'] : []), ...(options.use_nelder ? ['Nelder-Mead'] : []), '最小二乘'];
+    let progress = 8;
+    let stageIndex = 0;
+    document.getElementById('progressFill').style.width = `${progress}%`;
+    document.getElementById('progressText').textContent = `正在执行：${stages[stageIndex]}`;
+    progressTimer = window.setInterval(() => {
+        progress = Math.min(progress + 3, 92);
+        stageIndex = Math.min(Math.floor(progress / (100 / stages.length)), stages.length - 1);
+        document.getElementById('progressFill').style.width = `${progress}%`;
+        document.getElementById('progressText').textContent = `正在执行：${stages[stageIndex]}`;
+    }, 900);
+}
 
-document.getElementById('fitBtn').addEventListener('click', async function() {
-    if (!currentCSV) {
-        alert('请先导入 CSV 文件。');
-        return;
-    }
+async function runFit() {
+    if (!currentCSV) return setStatus('请先导入 CSV 或选择示例数据。', 'error');
+    previewController?.abort();
     const { params, bounds, fixed } = getCurrentParams();
     const options = {
         use_global: document.getElementById('useGlobal').checked,
         use_nelder: document.getElementById('useNelder').checked,
         use_log: document.getElementById('useLog').checked
     };
-
-    const btn = document.getElementById('fitBtn');
-    const progress = document.getElementById('progress');
-    btn.disabled = true;
-    btn.textContent = '本地拟合中...';
-    progress.classList.remove('hidden');
-    document.getElementById('resultContainer').textContent = '本地计算中...\n使用浏览器资源执行，不占用服务器请求。';
-
+    fitController = new AbortController();
+    setFitRunning(true, options);
+    setStatus('正式拟合由 SciPy 后端执行，可随时取消等待。', 'running');
     try {
-        const data = await runLocalFit({ csv: currentCSV, params, bounds, fixed, options });
-        if (data.success) {
-            lastResult = data;
-            updateChart(data.V, data.J_exp, data.J_fit);
-            setResultText(data);
-            updateInputsFromParams(data.params);
-            document.getElementById('exportParams').disabled = false;
-            document.getElementById('exportCSV').disabled = false;
-        } else {
-            alert('拟合失败: ' + data.error);
-        }
-    } catch (err) {
-        alert('请求失败: ' + err.message);
+        const response = await fetch('/api/fit', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ csv: currentCSV, params, bounds, fixed, options }), signal: fitController.signal
+        });
+        const data = await parseApiResponse(response);
+        lastResult = data;
+        updateChart(data.V, data.J_exp, data.J_fit);
+        setResultText(data);
+        updateInputsFromParams(data.params);
+        document.getElementById('exportParams').disabled = false;
+        document.getElementById('exportCSV').disabled = false;
+        setStatus(data.meta?.warnings?.length ? '拟合完成，但存在需要复核的诊断警告。' : '拟合完成，诊断未发现明显问题。', data.meta?.warnings?.length ? 'warning' : 'ready');
+    } catch (error) {
+        setStatus(error.name === 'AbortError' ? '已取消本次拟合等待。' : `拟合失败：${error.message}`, error.name === 'AbortError' ? 'idle' : 'error');
     } finally {
-        btn.disabled = false;
-        btn.textContent = '开始拟合';
-        progress.classList.add('hidden');
+        fitController = null;
+        setFitRunning(false);
     }
-});
+}
 
-document.getElementById('exportParams').addEventListener('click', function() {
-    if (!lastResult) return;
-    const text = document.getElementById('resultContainer').textContent;
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'params.txt';
-    a.click();
-    URL.revokeObjectURL(url);
-});
-
-document.getElementById('exportCSV').addEventListener('click', function() {
-    if (!lastResult) return;
-    let csv = 'V,J_Exp,J_Fit\n';
-    for (let i = 0; i < lastResult.V.length; i++) {
-        csv += `${lastResult.V[i]},${lastResult.J_exp[i]},${lastResult.J_fit[i]}\n`;
+async function loadSample(sampleId) {
+    try {
+        setStatus('正在载入示例数据...', 'running');
+        const data = await parseApiResponse(await fetch(`/api/sample/${sampleId}`));
+        currentCSV = data.csv;
+        document.getElementById('fileName').textContent = data.name;
+        parseAndPreviewUploadedCsv();
+    } catch (error) {
+        setStatus(`示例数据载入失败：${error.message}`, 'error');
     }
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'fit_result.csv';
-    a.click();
+}
+
+function download(content, type, filename) {
+    const url = URL.createObjectURL(new Blob([content], { type }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
     URL.revokeObjectURL(url);
+}
+
+document.getElementById('csvFile').addEventListener('change', event => {
+    const file = event.target.files[0];
+    if (!file) return;
+    if (file.size > 1_500_000) return setStatus('CSV 文件超过 1.5 MB 限制。', 'error');
+    document.getElementById('fileName').textContent = file.name;
+    const reader = new FileReader();
+    reader.onload = loadEvent => { currentCSV = loadEvent.target.result; parseAndPreviewUploadedCsv(); };
+    reader.readAsText(file);
+});
+document.querySelectorAll('[data-sample]').forEach(button => button.addEventListener('click', () => loadSample(button.dataset.sample)));
+document.getElementById('fitBtn').addEventListener('click', runFit);
+document.getElementById('cancelFitBtn').addEventListener('click', () => fitController?.abort());
+document.getElementById('exportParams').addEventListener('click', () => {
+    if (lastResult) download(JSON.stringify(lastResult, null, 2), 'application/json;charset=utf-8', 'fit_diagnostics.json');
+});
+document.getElementById('exportCSV').addEventListener('click', () => {
+    if (!lastResult) return;
+    const rows = ['V,J_Exp,J_Fit', ...lastResult.V.map((value, index) => `${value},${lastResult.J_exp[index]},${lastResult.J_fit[index]}`)];
+    download(rows.join('\n'), 'text/csv;charset=utf-8', 'fit_result.csv');
 });
 
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', () => {
     initParams();
     initChart();
+    updateMetrics();
 });

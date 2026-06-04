@@ -19,20 +19,19 @@ body {
 
 header {
     text-align: center;
-    color: white;
-    margin-bottom: 30px;
+    color: #102a43;
+    margin-bottom: 24px;
 }
 
 header h1 {
-    font-size: 2.5rem;
+    font-size: 2.25rem;
     font-weight: 700;
     margin-bottom: 8px;
-    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.2);
 }
 
 .subtitle {
     font-size: 1.1rem;
-    opacity: 0.9;
+    color: #52616f;
 }
 
 .main-content {
@@ -56,7 +55,8 @@ header h1 {
     background: white;
     border-radius: 8px;
     padding: 20px;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+    border: 1px solid #d9e2ec;
+    box-shadow: 0 6px 24px rgba(15, 23, 42, 0.08);
 }
 
 .card h2 {
@@ -80,6 +80,27 @@ header h1 {
     transition: transform 0.2s, box-shadow 0.2s;
 }
 
+.sample-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.btn-ghost {
+    padding: 10px 12px;
+    background: #f8fafc;
+    color: #2457a6;
+    border: 1px solid #b6c8df;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.btn-ghost:hover {
+    background: #edf4ff;
+}
+
 .btn-upload:hover {
     transform: translateY(-2px);
     box-shadow: 0 6px 20px rgba(36, 87, 166, 0.25);
@@ -94,6 +115,42 @@ header h1 {
     color: #666;
     font-size: 0.9rem;
     text-align: center;
+    overflow-wrap: anywhere;
+}
+
+.status-box {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #f8fafc;
+    border: 1px solid #d9e2ec;
+    color: #334e68;
+    font-size: 0.9rem;
+    line-height: 1.35;
+}
+
+.status-box[data-kind="running"] {
+    background: #fff8e6;
+    border-color: #f7d070;
+    color: #7c4d00;
+}
+
+.status-box[data-kind="ready"] {
+    background: #ecfdf5;
+    border-color: #a7f3d0;
+    color: #065f46;
+}
+
+.status-box[data-kind="error"] {
+    background: #fff1f2;
+    border-color: #fecdd3;
+    color: #9f1239;
+}
+
+.status-box[data-kind="warning"] {
+    background: #fff8e6;
+    border-color: #f7d070;
+    color: #7c4d00;
 }
 
 .params-grid {
@@ -231,6 +288,27 @@ header h1 {
     cursor: not-allowed;
 }
 
+.fit-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+}
+
+.btn-danger {
+    width: 100%;
+    padding: 11px;
+    background: #fff1f2;
+    color: #9f1239;
+    border: 1px solid #fecdd3;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.btn-danger:hover {
+    background: #ffe4e6;
+}
+
 .btn-group {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -275,6 +353,12 @@ header h1 {
     transition: width 0.3s;
 }
 
+.progress-text {
+    margin-top: 7px;
+    color: #52616f;
+    font-size: 0.82rem;
+}
+
 .hidden {
     display: none;
 }
@@ -290,6 +374,18 @@ header h1 {
     white-space: pre-wrap;
 }
 
+.quality-box {
+    margin-bottom: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid #f7d070;
+    background: #fff8e6;
+    color: #7c4d00;
+    font-size: 0.86rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+}
+
 .placeholder {
     color: #aaa;
     text-align: center;
@@ -299,13 +395,46 @@ header h1 {
     background: white;
     border-radius: 8px;
     padding: 24px;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+    border: 1px solid #d9e2ec;
+    box-shadow: 0 6px 24px rgba(15, 23, 42, 0.08);
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.metrics-strip {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.metric {
+    background: #f8fafc;
+    border: 1px solid #d9e2ec;
+    border-radius: 8px;
+    padding: 12px;
+    min-width: 0;
+}
+
+.metric span {
+    display: block;
+    color: #627d98;
+    font-size: 0.78rem;
+    margin-bottom: 4px;
+}
+
+.metric strong {
+    display: block;
+    color: #102a43;
+    font-size: 1rem;
+    overflow-wrap: anywhere;
 }
 
 .chart-container {
     width: 100%;
-    height: 100%;
+    min-height: 560px;
+    flex: 1;
 }
 
 @media (max-width: 1024px) {
@@ -317,6 +446,9 @@ header h1 {
     }
     .content-area {
         min-height: 500px;
+    }
+    .metrics-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
 
@@ -332,5 +464,12 @@ header h1 {
     }
     .param-input:last-child {
         grid-column: auto;
+    }
+    .sample-actions,
+    .metrics-strip {
+        grid-template-columns: 1fr;
+    }
+    .chart-container {
+        min-height: 420px;
     }
 }
