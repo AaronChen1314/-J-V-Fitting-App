@@ -6,7 +6,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from scipy.constants import e as q_e, k as k_B
-from scipy.optimize import curve_fit, differential_evolution, fsolve, least_squares, minimize
+from scipy.optimize import differential_evolution, fsolve, least_squares, minimize
 
 app = Flask(__name__)
 CORS(app)
@@ -28,9 +28,9 @@ def handle_exception(error):
 
 def double_diode_model(V_array, Jph, J01, J02, n1, n2, Rs, Rsh):
     J_calc = []
-    Jph_A = Jph * 1e-3
-    J01_A = J01 * 1e-3
-    J02_A = J02 * 1e-3
+    Jph_A = float(Jph) * 1e-3
+    J01_A = float(J01) * 1e-3
+    J02_A = float(J02) * 1e-3
     Rs = max(float(Rs), 0.0)
     Rsh = max(float(Rsh), 1e-2)
     n1 = max(float(n1), 1e-6)
@@ -62,15 +62,19 @@ def double_diode_model(V_array, Jph, J01, J02, n1, n2, Rs, Rsh):
 
 def parse_jv_csv(csv_content):
     if not csv_content:
-        raise ValueError("CSV 内容为空。")
+        raise ValueError("CSV content is empty.")
 
     df = pd.read_csv(io.StringIO(csv_content))
     if df.shape[1] < 2:
-        raise ValueError("CSV 至少需要两列：Voltage 和 Current/J。")
+        raise ValueError("CSV must contain at least voltage and current columns.")
 
     cols = [str(c).strip().lower() for c in df.columns]
     v_candidates = [i for i, c in enumerate(cols) if "volt" in c or c == "v"]
-    j_candidates = [i for i, c in enumerate(cols) if "curr" in c or c in {"j", "current", "current density"}]
+    j_candidates = [
+        i
+        for i, c in enumerate(cols)
+        if "curr" in c or c in {"j", "current", "current density"}
+    ]
     v_idx = v_candidates[0] if v_candidates else 0
     j_idx = j_candidates[0] if j_candidates else (1 if v_idx == 0 else 0)
 
@@ -80,13 +84,13 @@ def parse_jv_csv(csv_content):
     V_data = V_data[mask]
     J_data_mA = J_data_mA[mask]
     if len(V_data) < 3:
-        raise ValueError("有效数据点不足，至少需要 3 个 V-J 数据点。")
+        raise ValueError("At least 3 valid V-J data points are required.")
 
     order = np.argsort(V_data)
     V_data = V_data[order]
     J_data_mA = J_data_mA[order]
 
-    # 与 V5 桌面版一致：内部拟合使用负电流，绘图和导出时再取反。
+    # Internal convention follows the original V5 script: illuminated current is negative.
     if np.nanmean(J_data_mA) > 0:
         J_data_mA = -J_data_mA
     return V_data, J_data_mA
@@ -102,10 +106,7 @@ def estimate_jsc_at_zero(V_data, J_data_mA):
     else:
         span = max(float(np.ptp(V)), 1e-9)
         near = np.abs(V) <= max(0.02, span * 0.03)
-        if np.any(near):
-            j0 = float(np.median(J[near]))
-        else:
-            j0 = float(J[np.argmin(np.abs(V))])
+        j0 = float(np.median(J[near])) if np.any(near) else float(J[np.argmin(np.abs(V))])
     return max(-j0, 1e-9)
 
 
@@ -146,7 +147,6 @@ def estimate_defaults(V_data, J_data_mA):
     voc = estimate_voc(V_data, J_data_mA)
     rsh_guess = estimate_resistance(V_data, J_data_mA, "near_zero") or 2000.0
     rs_guess = estimate_resistance(V_data, J_data_mA, "forward") or 1.0
-
     rsh_guess = float(np.clip(rsh_guess, 100.0, 100000.0))
     rs_guess = float(np.clip(rs_guess, 0.01, 20.0))
 
@@ -163,10 +163,10 @@ def estimate_defaults(V_data, J_data_mA):
         "Jph": (max(jsc * 0.75, 1e-9), max(jsc * 1.25, jsc + 1e-6)),
         "J01": (1e-20, 1e-5),
         "J02": (1e-15, 1e-3),
-        "n1": (0.8, 1.3),
-        "n2": (1.4, 3.0),
-        "Rs": (0.01, max(20.0, rs_guess * 5)),
-        "Rsh": (100.0, max(100000.0, rsh_guess * 5)),
+        "n1": (0.8, 1.4),
+        "n2": (1.2, 3.5),
+        "Rs": (0.001, max(30.0, rs_guess * 10)),
+        "Rsh": (10.0, max(200000.0, rsh_guess * 10)),
     }
     meta = {"Jsc": jsc, "Voc": voc, "Rs_guess": rs_guess, "Rsh_guess": rsh_guess}
     return defaults, bounds, meta
@@ -226,12 +226,91 @@ def rmse(J_data_mA, J_model):
     return float(np.sqrt(np.mean((J_data_mA - J_model) ** 2)))
 
 
-def raw_residuals(J_data_mA, J_model, use_log):
+def residual_values(J_data_mA, J_model, use_log):
     if use_log:
         epsilon = 1e-6
         return np.log10(np.abs(J_model) + epsilon) - np.log10(np.abs(J_data_mA) + epsilon)
     scale = max(float(np.nanmax(np.abs(J_data_mA))), 1.0)
     return (J_model - J_data_mA) / scale
+
+
+def fit_double_diode(V_data, J_data_mA, params=None, bounds=None, fixed=None, options=None):
+    p0, b_min, b_max, meta = build_fit_inputs(V_data, J_data_mA, params, bounds)
+    fixed = fixed or {}
+    options = options or {}
+    fixed_flags = np.array([fixed.get(name, False) for name in PARAM_NAMES], dtype=bool)
+
+    idx_free = np.where(~fixed_flags)[0]
+    idx_fixed = np.where(fixed_flags)[0]
+    if len(idx_free) == 0:
+        J_final = double_diode_model(V_data, *p0)
+        return p0, J_final, rmse(J_data_mA, J_final), meta
+
+    free_names = [PARAM_NAMES[i] for i in idx_free]
+    p0_free = to_optimizer_space(p0[idx_free], free_names)
+    b_min_free = to_optimizer_space(b_min[idx_free], free_names)
+    b_max_free = to_optimizer_space(b_max[idx_free], free_names)
+    vals_fixed = p0[idx_fixed]
+
+    def reconstruct_full_params(params_free_opt):
+        params_full = np.zeros_like(p0)
+        params_full[idx_fixed] = vals_fixed
+        params_full[idx_free] = from_optimizer_space(params_free_opt, free_names)
+        return params_full
+
+    use_global = bool(options.get("use_global", False))
+    use_nelder = bool(options.get("use_nelder", False))
+    use_log = bool(options.get("use_log", False))
+
+    def residual_func(params_free):
+        p_full = reconstruct_full_params(params_free)
+        J_model = double_diode_model(V_data, *p_full)
+        return residual_values(J_data_mA, J_model, use_log)
+
+    def cost_func(params_free):
+        if np.any(params_free < b_min_free) or np.any(params_free > b_max_free):
+            return 1e20
+        residuals = residual_func(params_free)
+        return float(np.sum(residuals ** 2))
+
+    final_params_free = p0_free.copy()
+    if use_global:
+        result = differential_evolution(
+            cost_func,
+            list(zip(b_min_free, b_max_free)),
+            strategy="best1bin",
+            maxiter=int(options.get("global_maxiter", 35)),
+            popsize=int(options.get("global_popsize", 8)),
+            workers=1,
+            polish=False,
+            updating="immediate",
+        )
+        final_params_free = result.x
+
+    if use_nelder:
+        res = minimize(
+            cost_func,
+            final_params_free,
+            method="Nelder-Mead",
+            tol=1e-5,
+            options={"maxiter": int(options.get("nelder_maxiter", 900)), "xatol": 1e-5, "fatol": 1e-5},
+        )
+        final_params_free = np.clip(res.x, b_min_free, b_max_free)
+
+    lsq = least_squares(
+        residual_func,
+        final_params_free,
+        bounds=(b_min_free, b_max_free),
+        loss="linear",
+        max_nfev=int(options.get("max_nfev", 2400)),
+        xtol=1e-9,
+        ftol=1e-9,
+        gtol=1e-9,
+    )
+    final_params_free = lsq.x
+    final_params_full = reconstruct_full_params(final_params_free)
+    J_final = double_diode_model(V_data, *final_params_full)
+    return final_params_full, J_final, rmse(J_data_mA, J_final), meta
 
 
 @app.route("/")
@@ -260,124 +339,22 @@ def preview():
 def fit():
     data = request.get_json(silent=True) or {}
     V_data, J_data_mA = parse_jv_csv(data.get("csv", ""))
-    p0, b_min, b_max, meta = build_fit_inputs(
+    params, J_final, fit_rmse, meta = fit_double_diode(
         V_data,
         J_data_mA,
-        data.get("params"),
-        data.get("bounds"),
+        params=data.get("params"),
+        bounds=data.get("bounds"),
+        fixed=data.get("fixed"),
+        options=data.get("options"),
     )
-
-    fixed = data.get("fixed", {}) or {}
-    options = data.get("options", {}) or {}
-    fixed_flags = np.array([fixed.get(name, False) for name in PARAM_NAMES], dtype=bool)
-
-    idx_free = np.where(~fixed_flags)[0]
-    idx_fixed = np.where(fixed_flags)[0]
-
-    if len(idx_free) == 0:
-        J_final = double_diode_model(V_data, *p0)
-        return jsonify({
-            "success": True,
-            "params": dict(zip(PARAM_NAMES, p0.tolist())),
-            "V": V_data.tolist(),
-            "J_exp": (-J_data_mA).tolist(),
-            "J_fit": (-J_final).tolist(),
-            "rmse": rmse(J_data_mA, J_final),
-            "fixed": fixed,
-            "meta": meta,
-        })
-
-    free_names = [PARAM_NAMES[i] for i in idx_free]
-    p0_free = to_optimizer_space(p0[idx_free], free_names)
-    b_min_free = to_optimizer_space(b_min[idx_free], free_names)
-    b_max_free = to_optimizer_space(b_max[idx_free], free_names)
-    vals_fixed = p0[idx_fixed]
-
-    def reconstruct_full_params(params_free_opt):
-        params_full = np.zeros_like(p0)
-        params_full[idx_fixed] = vals_fixed
-        params_full[idx_free] = from_optimizer_space(params_free_opt, free_names)
-        return params_full
-
-    use_global = bool(options.get("use_global", False))
-    use_nelder = bool(options.get("use_nelder", False))
-    use_log = bool(options.get("use_log", False))
-
-    def residual_func(params_free):
-        p_full = reconstruct_full_params(params_free)
-        J_model = double_diode_model(V_data, *p_full)
-        return raw_residuals(J_data_mA, J_model, use_log)
-
-    def cost_func(params_free):
-        if np.any(params_free < b_min_free) or np.any(params_free > b_max_free):
-            return 1e20
-        residuals = residual_func(params_free)
-        return float(np.sum(residuals ** 2))
-
-    final_params_free = p0_free.copy()
-
-    if use_global:
-        result = differential_evolution(
-            cost_func,
-            list(zip(b_min_free, b_max_free)),
-            strategy="best1bin",
-            maxiter=35,
-            popsize=8,
-            workers=1,
-            polish=False,
-            updating="immediate",
-        )
-        final_params_free = result.x
-
-    if use_nelder:
-        res = minimize(
-            cost_func,
-            final_params_free,
-            method="Nelder-Mead",
-            tol=1e-5,
-            options={"maxiter": 900, "xatol": 1e-5, "fatol": 1e-5},
-        )
-        final_params_free = np.clip(res.x, b_min_free, b_max_free)
-
-    try:
-        lsq = least_squares(
-            residual_func,
-            final_params_free,
-            bounds=(b_min_free, b_max_free),
-            loss="linear",
-            max_nfev=2400,
-            xtol=1e-9,
-            ftol=1e-9,
-            gtol=1e-9,
-        )
-        final_params_free = lsq.x
-    except Exception:
-        def model_wrapper_for_curve_fit(v, *args_free):
-            return double_diode_model(v, *reconstruct_full_params(np.array(args_free)))
-
-        try:
-            popt, _ = curve_fit(
-                model_wrapper_for_curve_fit,
-                V_data,
-                J_data_mA,
-                p0=final_params_free,
-                bounds=(b_min_free, b_max_free),
-                max_nfev=1600,
-            )
-            final_params_free = popt
-        except Exception:
-            pass
-
-    final_params_full = reconstruct_full_params(final_params_free)
-    J_final = double_diode_model(V_data, *final_params_full)
     return jsonify({
         "success": True,
-        "params": dict(zip(PARAM_NAMES, final_params_full.tolist())),
+        "params": dict(zip(PARAM_NAMES, params.tolist())),
         "V": V_data.tolist(),
         "J_exp": (-J_data_mA).tolist(),
         "J_fit": (-J_final).tolist(),
-        "rmse": rmse(J_data_mA, J_final),
-        "fixed": fixed,
+        "rmse": fit_rmse,
+        "fixed": data.get("fixed", {}) or {},
         "meta": meta,
     })
 
