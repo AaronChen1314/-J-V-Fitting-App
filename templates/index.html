@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>J-V 曲线拟合 - 双二极管模型</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>J-V 曲线拟合 (双二极管模型)</h1>
+            <p class="subtitle">Double Diode Model Fitting Tool</p>
+        </header>
+
+        <div class="main-content">
+            <aside class="sidebar">
+                <section class="card">
+                    <h2>1. 导入数据</h2>
+                    <input type="file" id="csvFile" accept=".csv">
+                    <label for="csvFile" class="btn-upload">选择 CSV 文件</label>
+                    <p id="fileName" class="file-name">无文件</p>
+                </section>
+
+                <section class="card">
+                    <h2>2. 参数设置</h2>
+                    <div id="paramContainer" class="params-grid">
+                        <!-- Parameters will be dynamically generated -->
+                    </div>
+                </section>
+
+                <section class="card">
+                    <h2>3. 拟合策略</h2>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="useGlobal">
+                        <span>启用全局优化 (DE)</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="useNelder" checked>
+                        <span>使用 Nelder-Mead (推荐)</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="useLog">
+                        <span>对数空间拟合</span>
+                    </label>
+                    <button id="fitBtn" class="btn-primary">开始拟合</button>
+                    <div id="progress" class="progress-bar hidden">
+                        <div class="progress-fill"></div>
+                    </div>
+                </section>
+
+                <section class="card">
+                    <h2>4. 结果</h2>
+                    <div id="resultContainer" class="result-box">
+                        <p class="placeholder">等待拟合...</p>
+                    </div>
+                    <div class="btn-group">
+                        <button id="exportParams" class="btn-secondary" disabled>导出参数</button>
+                        <button id="exportCSV" class="btn-secondary" disabled>导出 CSV</button>
+                    </div>
+                </section>
+            </aside>
+
+            <main class="content-area">
+                <div class="chart-container">
+                    <canvas id="jvChart"></canvas>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
