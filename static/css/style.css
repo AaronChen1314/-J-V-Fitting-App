@@ -37,7 +37,7 @@ header h1 {
 
 .main-content {
     display: grid;
-    grid-template-columns: 420px 1fr;
+    grid-template-columns: minmax(460px, 520px) minmax(0, 1fr);
     gap: 20px;
 }
 
@@ -47,6 +47,9 @@ header h1 {
     gap: 16px;
     max-height: calc(100vh - 160px);
     overflow-y: auto;
+    overflow-x: hidden;
+    min-width: 0;
+    padding-right: 6px;
 }
 
 .card {
@@ -104,18 +107,22 @@ header h1 {
     border: 1px solid #e2e8f0;
     border-radius: 8px;
     padding: 12px;
+    min-width: 0;
+    overflow: hidden;
 }
 
 .param-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 10px;
     margin-bottom: 8px;
 }
 
 .param-name {
     font-weight: 600;
     color: #444;
+    min-width: 0;
 }
 
 .param-live-value {
@@ -151,13 +158,18 @@ header h1 {
 
 .param-inputs {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 8px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
 }
 
 .param-input {
     display: flex;
     flex-direction: column;
+    min-width: 0;
+}
+
+.param-input:last-child {
+    grid-column: 1 / -1;
 }
 
 .param-input label {
@@ -173,6 +185,8 @@ header h1 {
 }
 
 .param-input input {
+    width: 100%;
+    min-width: 0;
     padding: 6px 8px;
     border: 1px solid #ddd;
     border-radius: 6px;
@@ -286,6 +300,7 @@ header h1 {
     border-radius: 8px;
     padding: 24px;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+    min-width: 0;
 }
 
 .chart-container {
@@ -302,5 +317,20 @@ header h1 {
     }
     .content-area {
         min-height: 500px;
+    }
+}
+
+@media (max-width: 520px) {
+    body {
+        padding: 12px;
+    }
+    .card {
+        padding: 16px;
+    }
+    .param-inputs {
+        grid-template-columns: 1fr;
+    }
+    .param-input:last-child {
+        grid-column: auto;
     }
 }
