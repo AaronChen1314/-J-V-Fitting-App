@@ -3,6 +3,7 @@ let currentCSV = null;
 let lastResult = null;
 let previewTimer = null;
 let previewController = null;
+let fitWorker = null;
 
 const defaultParams = {
     Jph: 10,
@@ -36,7 +37,7 @@ const paramLabels = {
 
 function formatValue(name, value) {
     if (!Number.isFinite(value)) return '';
-    if (paramBounds[name].log || Math.abs(value) >= 1e4 || Math.abs(value) < 1e-3) {
+    if (paramBounds[name]?.log || Math.abs(value) >= 1e4 || Math.abs(value) < 1e-3) {
         return value.toExponential(4);
     }
     return value.toFixed(name === 'Rsh' ? 2 : 4);
@@ -121,10 +122,8 @@ function setParamValue(name, value, updateSlider = true) {
 }
 
 function syncSliderFromValue(name) {
-    const input = document.getElementById(`val-${name}`);
-    const value = parseFloat(input.value);
-    if (!Number.isFinite(value)) return;
-    setParamValue(name, value, true);
+    const value = parseFloat(document.getElementById(`val-${name}`).value);
+    if (Number.isFinite(value)) setParamValue(name, value, true);
 }
 
 function updateBoundsForParam(name) {
@@ -138,7 +137,6 @@ function updateBoundsForParam(name) {
         max = Math.max(max, min * 10);
     }
     if (max <= min) max = min + Math.max(Math.abs(min), 1);
-
     document.getElementById(`min-${name}`).value = min;
     document.getElementById(`max-${name}`).value = max;
     slider.min = paramBounds[name].log ? Math.log10(min) : min;
@@ -209,11 +207,7 @@ function initChart() {
             maintainAspectRatio: false,
             animation: false,
             plugins: {
-                title: {
-                    display: true,
-                    text: 'J-V Curve Analysis',
-                    font: { size: 18, weight: 'bold' }
-                },
+                title: { display: true, text: 'J-V Curve Analysis', font: { size: 18, weight: 'bold' } },
                 legend: { position: 'top' }
             },
             scales: {
@@ -243,8 +237,11 @@ function setResultText(data, prefix = '') {
     let resultText = `${prefix}RMSE: ${data.rmse.toFixed(6)}\n\n`;
     if (data.meta?.Jsc) resultText += `Jsc(V≈0): ${formatValue('Jph', data.meta.Jsc)}\n`;
     if (data.meta?.Voc) resultText += `Voc: ${data.meta.Voc.toFixed(4)} V\n`;
+    if (data.meta?.mode) resultText += `Mode: ${data.meta.mode}\n`;
+    if (data.meta?.candidates?.length) {
+        resultText += `Candidates: ${data.meta.candidates.map(c => `${c.mode} RMSE=${c.rmse.toFixed(4)}`).join('; ')}\n`;
+    }
     resultText += '\n';
-
     for (const [name, val] of Object.entries(data.params)) {
         resultText += `${name}: ${formatValue(name, val)}`;
         if (data.fixed && data.fixed[name]) resultText += ' [锁定]';
@@ -265,7 +262,6 @@ function estimateJscFromRows(rows) {
     let J = sorted.map(row => row[1]);
     const meanJ = J.reduce((a, b) => a + b, 0) / J.length;
     if (meanJ > 0) J = J.map(j => -j);
-
     for (let i = 0; i < sorted.length; i++) {
         if (Math.abs(sorted[i][0]) < 1e-12) return Math.max(-J[i], 1e-9);
     }
@@ -277,9 +273,7 @@ function estimateJscFromRows(rows) {
             return Math.max(-j0, 1e-9);
         }
     }
-    const nearest = sorted
-        .map((row, i) => ({ distance: Math.abs(row[0]), value: J[i] }))
-        .sort((a, b) => a.distance - b.distance)[0];
+    const nearest = sorted.map((row, i) => ({ distance: Math.abs(row[0]), value: J[i] })).sort((a, b) => a.distance - b.distance)[0];
     return nearest ? Math.max(-nearest.value, 1e-9) : null;
 }
 
@@ -296,9 +290,7 @@ function parseAndPreviewUploadedCsv() {
     const data = [];
     for (let i = 1; i < lines.length; i++) {
         const parts = lines[i].split(',').map(v => parseFloat(v.trim()));
-        if (Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
-            data.push(parts);
-        }
+        if (Number.isFinite(parts[0]) && Number.isFinite(parts[1])) data.push(parts);
     }
     const V = data.map(d => d[0]);
     let J = data.map(d => d[1]);
@@ -320,7 +312,6 @@ async function runPreview() {
     if (previewController) previewController.abort();
     previewController = new AbortController();
     const { params, bounds } = getCurrentParams();
-
     try {
         const res = await fetch('/api/preview', {
             method: 'POST',
@@ -333,10 +324,48 @@ async function runPreview() {
         updateChart(data.V, data.J_exp, data.J_fit);
         setResultText(data, '[预览] ');
     } catch (err) {
-        if (err.name !== 'AbortError') {
-            console.warn('Preview failed:', err);
-        }
+        if (err.name !== 'AbortError') console.warn('Preview failed:', err);
     }
+}
+
+function runLocalFit(payload) {
+    return new Promise((resolve, reject) => {
+        if (typeof Worker === 'undefined') {
+            reject(new Error('当前浏览器不支持 Web Worker，无法保证本地资源计算。请使用 Chrome/Edge/Firefox，或在本机运行 Flask 后重试。'));
+            return;
+        }
+        if (fitWorker) fitWorker.terminate();
+        fitWorker = new Worker('/static/js/fit-worker.js');
+        const timeout = window.setTimeout(() => {
+            fitWorker.terminate();
+            reject(new Error('本地拟合超时，请缩小参数范围或关闭全局优化后重试。'));
+        }, 120000);
+        fitWorker.onmessage = event => {
+            const { type, message, result, error } = event.data || {};
+            if (type === 'progress' && message) {
+                document.getElementById('resultContainer').textContent = `本地计算中...\n${message}`;
+            }
+            if (type === 'result') {
+                window.clearTimeout(timeout);
+                fitWorker.terminate();
+                fitWorker = null;
+                resolve(result);
+            }
+            if (type === 'error') {
+                window.clearTimeout(timeout);
+                fitWorker.terminate();
+                fitWorker = null;
+                reject(new Error(error || '本地拟合失败'));
+            }
+        };
+        fitWorker.onerror = event => {
+            window.clearTimeout(timeout);
+            fitWorker.terminate();
+            fitWorker = null;
+            reject(new Error(event.message || 'Web Worker 执行失败'));
+        };
+        fitWorker.postMessage({ type: 'fit', payload });
+    });
 }
 
 document.getElementById('csvFile').addEventListener('change', function(e) {
@@ -366,16 +395,12 @@ document.getElementById('fitBtn').addEventListener('click', async function() {
     const btn = document.getElementById('fitBtn');
     const progress = document.getElementById('progress');
     btn.disabled = true;
-    btn.textContent = '拟合中...';
+    btn.textContent = '本地拟合中...';
     progress.classList.remove('hidden');
+    document.getElementById('resultContainer').textContent = '本地计算中...\n使用浏览器资源执行，不占用服务器请求。';
 
     try {
-        const res = await fetch('/api/fit', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ csv: currentCSV, params, bounds, fixed, options })
-        });
-        const data = await parseApiResponse(res);
+        const data = await runLocalFit({ csv: currentCSV, params, bounds, fixed, options });
         if (data.success) {
             lastResult = data;
             updateChart(data.V, data.J_exp, data.J_fit);
