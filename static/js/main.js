@@ -162,6 +162,20 @@ function getCurrentParams() {
     return { params, bounds, fixed };
 }
 
+async function parseApiResponse(res) {
+    const contentType = res.headers.get('content-type') || '';
+    const text = await res.text();
+    if (contentType.includes('application/json')) {
+        try {
+            return JSON.parse(text);
+        } catch (err) {
+            throw new Error(`服务器返回的 JSON 无法解析：${err.message}`);
+        }
+    }
+    const plain = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    throw new Error(plain ? plain.slice(0, 240) : `服务器返回 ${res.status}`);
+}
+
 function initChart() {
     const ctx = document.getElementById('jvChart').getContext('2d');
     chart = new Chart(ctx, {
@@ -227,6 +241,10 @@ function updateChart(V, JExp, JFit = null) {
 
 function setResultText(data, prefix = '') {
     let resultText = `${prefix}RMSE: ${data.rmse.toFixed(6)}\n\n`;
+    if (data.meta?.Jsc) resultText += `Jsc(V≈0): ${formatValue('Jph', data.meta.Jsc)}\n`;
+    if (data.meta?.Voc) resultText += `Voc: ${data.meta.Voc.toFixed(4)} V\n`;
+    resultText += '\n';
+
     for (const [name, val] of Object.entries(data.params)) {
         resultText += `${name}: ${formatValue(name, val)}`;
         if (data.fixed && data.fixed[name]) resultText += ' [锁定]';
@@ -239,6 +257,38 @@ function updateInputsFromParams(params) {
     for (const [name, val] of Object.entries(params)) {
         setParamValue(name, val, true);
     }
+}
+
+function estimateJscFromRows(rows) {
+    if (!rows.length) return null;
+    const sorted = [...rows].sort((a, b) => a[0] - b[0]);
+    let J = sorted.map(row => row[1]);
+    const meanJ = J.reduce((a, b) => a + b, 0) / J.length;
+    if (meanJ > 0) J = J.map(j => -j);
+
+    for (let i = 0; i < sorted.length; i++) {
+        if (Math.abs(sorted[i][0]) < 1e-12) return Math.max(-J[i], 1e-9);
+    }
+    for (let i = 0; i < sorted.length - 1; i++) {
+        const v1 = sorted[i][0];
+        const v2 = sorted[i + 1][0];
+        if (v1 <= 0 && v2 >= 0 && v2 !== v1) {
+            const j0 = J[i] + (0 - v1) * (J[i + 1] - J[i]) / (v2 - v1);
+            return Math.max(-j0, 1e-9);
+        }
+    }
+    const nearest = sorted
+        .map((row, i) => ({ distance: Math.abs(row[0]), value: J[i] }))
+        .sort((a, b) => a.distance - b.distance)[0];
+    return nearest ? Math.max(-nearest.value, 1e-9) : null;
+}
+
+function applyJscInitialGuess(jsc) {
+    if (!Number.isFinite(jsc) || jsc <= 0) return;
+    document.getElementById('min-Jph').value = Math.max(jsc * 0.75, 1e-9);
+    document.getElementById('max-Jph').value = Math.max(jsc * 1.25, jsc + 1e-6);
+    updateBoundsForParam('Jph');
+    setParamValue('Jph', jsc, true);
 }
 
 function parseAndPreviewUploadedCsv() {
@@ -255,10 +305,11 @@ function parseAndPreviewUploadedCsv() {
     const meanJ = J.reduce((a, b) => a + b, 0) / Math.max(J.length, 1);
     if (meanJ > 0) J = J.map(j => -j);
     updateChart(V, J.map(j => -j));
+    applyJscInitialGuess(estimateJscFromRows(data));
     schedulePreview(0);
 }
 
-function schedulePreview(delay = 140) {
+function schedulePreview(delay = 180) {
     window.clearTimeout(previewTimer);
     if (!currentCSV) return;
     previewTimer = window.setTimeout(runPreview, delay);
@@ -277,7 +328,7 @@ async function runPreview() {
             body: JSON.stringify({ csv: currentCSV, params, bounds }),
             signal: previewController.signal
         });
-        const data = await res.json();
+        const data = await parseApiResponse(res);
         if (!data.success) return;
         updateChart(data.V, data.J_exp, data.J_fit);
         setResultText(data, '[预览] ');
@@ -324,7 +375,7 @@ document.getElementById('fitBtn').addEventListener('click', async function() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ csv: currentCSV, params, bounds, fixed, options })
         });
-        const data = await res.json();
+        const data = await parseApiResponse(res);
         if (data.success) {
             lastResult = data;
             updateChart(data.V, data.J_exp, data.J_fit);
