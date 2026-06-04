@@ -1,3 +1,5 @@
+import json
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -72,9 +74,9 @@ class ApiTests(unittest.TestCase):
 
     def test_page_exposes_selection_controls(self):
         html = self.client.get("/").get_data(as_text=True)
-        self.assertIn('name="selectionMetric"', html)
-        self.assertIn('value="rmse" checked', html)
-        self.assertIn("生成低电流候选", html)
+        self.assertNotIn('name="selectionMetric"', html)
+        self.assertIn("对数空间候选", html)
+        self.assertIn("开始拟合", html)
 
     def test_invalid_bounds_return_clear_error(self):
         response = self.client.post(
@@ -175,6 +177,76 @@ class ApiTests(unittest.TestCase):
         selected = next(item for item in candidates if item["name"] == data["meta"]["selected_candidate"])
         self.assertAlmostEqual(selected["balanced_score"], min(item["balanced_score"] for item in candidates))
         self.assertEqual(data["meta"]["selection_metric"], "balanced")
+
+    def test_frontend_uses_worker_fit_path(self):
+        main_js = (app.BASE_DIR / "static" / "js" / "main.js").read_text(encoding="utf-8")
+        worker_js = (app.BASE_DIR / "static" / "js" / "fit-worker.js").read_text(encoding="utf-8")
+        self.assertIn("function runLocalFit", main_js)
+        self.assertIn("new Worker('/static/js/fit-worker.js')", main_js)
+        self.assertNotIn("input[name=\"selectionMetric\"]", main_js)
+        self.assertIn("function optimize", worker_js)
+        self.assertIn("function nelderMead", worker_js)
+
+    def test_worker_sample_fit_regression(self):
+        targets = {"nbg": 0.45, "wbg": 0.45}
+        for sample_name, csv in self.samples.items():
+            with self.subTest(sample=sample_name):
+                payload = self._worker_payload(csv)
+                result = self._run_worker(payload)
+                self.assertLess(result["rmse"], targets[sample_name])
+                self.assertIn(result["meta"]["mode"], {"linear", "log"})
+
+    def _worker_payload(self, csv):
+        voltage, current = app.parse_jv_csv(csv)
+        jsc = app.estimate_jsc_at_zero(voltage, current)
+        return {
+            "csv": csv,
+            "params": {
+                "Jph": jsc,
+                "J01": 1e-12,
+                "J02": 1e-8,
+                "n1": 1.0,
+                "n2": 2.0,
+                "Rs": 1.0,
+                "Rsh": 2000.0,
+            },
+            "bounds": {
+                "Jph": {"min": max(jsc * 0.75, 1e-9), "max": max(jsc * 1.25, jsc + 1e-6)},
+                "J01": {"min": 1e-20, "max": 1e-5},
+                "J02": {"min": 1e-15, "max": 1e-3},
+                "n1": {"min": 0.5, "max": 2.0},
+                "n2": {"min": 1.0, "max": 4.0},
+                "Rs": {"min": 0.01, "max": 100.0},
+                "Rsh": {"min": 10.0, "max": 1e6},
+            },
+            "fixed": {},
+            "options": {"use_global": True},
+        }
+
+    def _run_worker(self, payload):
+        script = r"""
+const fs = require('fs');
+const vm = require('vm');
+let output = null;
+global.self = {};
+global.postMessage = (message) => {
+  if (message.type === 'result') output = message.result;
+  if (message.type === 'error') throw new Error(message.error);
+};
+vm.runInThisContext(fs.readFileSync('static/js/fit-worker.js', 'utf8'), { filename: 'fit-worker.js' });
+self.onmessage({ data: { type: 'fit', payload: JSON.parse(fs.readFileSync(0, 'utf8')) } });
+console.log(JSON.stringify({ rmse: output.rmse, meta: output.meta }));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            cwd=app.BASE_DIR,
+            check=True,
+            timeout=30,
+        )
+        return json.loads(completed.stdout)
 
 
 if __name__ == "__main__":

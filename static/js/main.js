@@ -6,6 +6,8 @@ let previewController = null;
 let fitController = null;
 let progressTimer = null;
 let needsInitialGuess = false;
+let fitWorker = null;
+let activeFitReject = null;
 
 const defaultParams = { Jph: 10, J01: 1e-12, J02: 1e-8, n1: 1, n2: 2, Rs: 1, Rsh: 2000 };
 const paramBounds = {
@@ -162,7 +164,7 @@ function updateMetrics(data = null) {
     document.getElementById('metricRmse').textContent = data?.rmse != null ? data.rmse.toFixed(6) : '--';
     document.getElementById('metricJsc').textContent = data?.meta?.Jsc != null ? formatValue('Jph', data.meta.Jsc) : '--';
     document.getElementById('metricVoc').textContent = data?.meta?.Voc != null ? `${data.meta.Voc.toFixed(4)} V` : '--';
-    document.getElementById('metricMode').textContent = data?.meta?.quality === 'good' ? '可靠' : data?.meta?.quality === 'warning' ? '需复核' : '--';
+    document.getElementById('metricMode').textContent = data?.meta?.quality === 'good' ? '可靠' : data?.meta?.quality === 'warning' ? '需复核' : data?.meta?.mode || '--';
 }
 
 function updateQuality(meta = {}) {
@@ -175,15 +177,14 @@ function updateQuality(meta = {}) {
 
 function setResultText(data, prefix = '') {
     const meta = data.meta || {};
-    const selectionLabel = meta.selection_metric === 'balanced' ? '低电流优先' : '整体 RMSE';
     const lines = [
         `${prefix}RMSE: ${data.rmse.toFixed(6)}`,
         `模式: ${meta.mode || '--'}`,
-        `入选候选: ${meta.selected_candidate || '--'}`,
-        `择优标准: ${selectionLabel}`,
-        `阶段: ${(meta.stages || []).join(' → ') || '--'}`,
-        `求解收敛点: ${meta.solver?.converged_points ?? '--'} / ${meta.solver?.points ?? '--'}`,
-        `优化评估次数: ${meta.optimizer?.evaluations ?? '--'}`,
+        ...(meta.selected_candidate ? [`入选候选: ${meta.selected_candidate}`] : []),
+        ...(meta.selection_metric ? [`择优标准: ${meta.selection_metric === 'balanced' ? '低电流优先' : '整体 RMSE'}`] : []),
+        ...(meta.stages?.length ? [`阶段: ${meta.stages.join(' → ')}`] : []),
+        ...(meta.solver ? [`求解收敛点: ${meta.solver.converged_points ?? '--'} / ${meta.solver.points ?? '--'}`] : []),
+        ...(meta.optimizer ? [`优化评估次数: ${meta.optimizer.evaluations ?? '--'}`] : []),
         ''
     ];
     for (const [name, value] of Object.entries(data.params)) {
@@ -193,8 +194,10 @@ function setResultText(data, prefix = '') {
         lines.push('', '候选对比:');
         for (const candidate of meta.candidates) {
             const selectedMark = candidate.name === meta.selected_candidate ? ' [入选]' : '';
+            const label = candidate.name || candidate.mode || 'candidate';
+            const score = Number.isFinite(candidate.balanced_score) ? candidate.balanced_score : candidate.score;
             lines.push(
-                `- ${candidate.name}${selectedMark}: RMSE=${candidate.rmse.toFixed(6)}, 综合评分=${candidate.balanced_score.toFixed(6)}`
+                `- ${label}${selectedMark}: RMSE=${candidate.rmse.toFixed(6)}, 评分=${Number.isFinite(score) ? score.toFixed(6) : '--'}`
             );
         }
     }
@@ -238,7 +241,7 @@ async function runPreview() {
             document.getElementById('min-Jph').value = Math.max(jsc * 0.75, 1e-9);
             document.getElementById('max-Jph').value = Math.max(jsc * 1.25, jsc + 1e-6);
             updateBoundsForParam('Jph');
-            setParamValue('Jph', jsc);
+            updateInputsFromParams(data.params);
             schedulePreview(0);
         }
         setStatus(`已解析 ${data.V.length} 个数据点，参数预览已更新。`, 'ready');
@@ -255,11 +258,11 @@ function setFitRunning(running, options = {}) {
     document.getElementById('progress').classList.toggle('hidden', !running);
     document.getElementById('progressText').classList.toggle('hidden', !running);
     fitButton.disabled = running;
-    fitButton.textContent = running ? '正式拟合中...' : '开始正式拟合';
+    fitButton.textContent = running ? '本地拟合中...' : '开始拟合';
     cancelButton.classList.toggle('hidden', !running);
     window.clearInterval(progressTimer);
     if (!running) return;
-    const stages = ['线性最小二乘', ...(options.use_global ? ['差分进化'] : []), ...(options.use_nelder ? ['Nelder-Mead'] : []), ...(options.use_log ? ['低电流候选'] : []), '自动择优'];
+    const stages = ['本地搜索', '轻量 Nelder-Mead', ...(options.use_log ? ['对数候选'] : []), '自动择优'];
     let progress = 8;
     let stageIndex = 0;
     document.getElementById('progressFill').style.width = `${progress}%`;
@@ -272,6 +275,61 @@ function setFitRunning(running, options = {}) {
     }, 900);
 }
 
+function runLocalFit(payload) {
+    return new Promise((resolve, reject) => {
+        if (typeof Worker === 'undefined') {
+            reject(new Error('当前浏览器不支持 Web Worker。请使用 Chrome、Edge 或 Firefox。'));
+            return;
+        }
+        if (fitWorker) fitWorker.terminate();
+        activeFitReject = reject;
+        fitWorker = new Worker('/static/js/fit-worker.js');
+        const timeout = window.setTimeout(() => {
+            fitWorker?.terminate();
+            fitWorker = null;
+            activeFitReject = null;
+            reject(new Error('本地拟合超时，请缩小参数范围或关闭扩展搜索后重试。'));
+        }, 120000);
+        fitWorker.onmessage = event => {
+            const { type, message, result, error } = event.data || {};
+            if (type === 'progress' && message) {
+                setStatus(`本地计算中：${message}`, 'running');
+                document.getElementById('resultContainer').textContent = `本地计算中...\n${message}`;
+            }
+            if (type === 'result') {
+                window.clearTimeout(timeout);
+                fitWorker.terminate();
+                fitWorker = null;
+                activeFitReject = null;
+                resolve(result);
+            }
+            if (type === 'error') {
+                window.clearTimeout(timeout);
+                fitWorker.terminate();
+                fitWorker = null;
+                activeFitReject = null;
+                reject(new Error(error || '本地拟合失败'));
+            }
+        };
+        fitWorker.onerror = event => {
+            window.clearTimeout(timeout);
+            fitWorker?.terminate();
+            fitWorker = null;
+            activeFitReject = null;
+            reject(new Error(event.message || 'Web Worker 执行失败'));
+        };
+        fitWorker.postMessage({ type: 'fit', payload });
+    });
+}
+
+function cancelLocalFit() {
+    if (!fitWorker) return;
+    fitWorker.terminate();
+    fitWorker = null;
+    if (activeFitReject) activeFitReject(new DOMException('已取消本次拟合等待。', 'AbortError'));
+    activeFitReject = null;
+}
+
 async function runFit() {
     if (!currentCSV) return setStatus('请先导入 CSV 或选择示例数据。', 'error');
     previewController?.abort();
@@ -279,25 +337,21 @@ async function runFit() {
     const options = {
         use_global: document.getElementById('useGlobal').checked,
         use_nelder: document.getElementById('useNelder').checked,
-        use_log: document.getElementById('useLog').checked,
-        selection_metric: document.querySelector('input[name="selectionMetric"]:checked').value
+        use_log: document.getElementById('useLog').checked
     };
-    fitController = new AbortController();
+    fitController = { running: true };
     setFitRunning(true, options);
-    setStatus('正式拟合由 SciPy 后端执行，可随时取消等待。', 'running');
+    setStatus('本地计算中：使用浏览器资源执行，不占用服务器请求。', 'running');
+    document.getElementById('resultContainer').textContent = '本地计算中...\n使用浏览器资源执行，不占用服务器请求。';
     try {
-        const response = await fetch('/api/fit', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ csv: currentCSV, params, bounds, fixed, options }), signal: fitController.signal
-        });
-        const data = await parseApiResponse(response);
+        const data = await runLocalFit({ csv: currentCSV, params, bounds, fixed, options });
         lastResult = data;
         updateChart(data.V, data.J_exp, data.J_fit);
         setResultText(data);
         updateInputsFromParams(data.params);
         document.getElementById('exportParams').disabled = false;
         document.getElementById('exportCSV').disabled = false;
-        setStatus(data.meta?.warnings?.length ? '拟合完成，但存在需要复核的诊断警告。' : '拟合完成，诊断未发现明显问题。', data.meta?.warnings?.length ? 'warning' : 'ready');
+        setStatus('本地拟合完成。', 'ready');
     } catch (error) {
         setStatus(error.name === 'AbortError' ? '已取消本次拟合等待。' : `拟合失败：${error.message}`, error.name === 'AbortError' ? 'idle' : 'error');
     } finally {
@@ -338,7 +392,7 @@ document.getElementById('csvFile').addEventListener('change', event => {
 });
 document.querySelectorAll('[data-sample]').forEach(button => button.addEventListener('click', () => loadSample(button.dataset.sample)));
 document.getElementById('fitBtn').addEventListener('click', runFit);
-document.getElementById('cancelFitBtn').addEventListener('click', () => fitController?.abort());
+document.getElementById('cancelFitBtn').addEventListener('click', cancelLocalFit);
 document.getElementById('exportParams').addEventListener('click', () => {
     if (lastResult) download(JSON.stringify(lastResult, null, 2), 'application/json;charset=utf-8', 'fit_diagnostics.json');
 });

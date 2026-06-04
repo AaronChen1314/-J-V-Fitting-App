@@ -35,20 +35,9 @@
 
                 <section class="card">
                     <h2>3. 拟合策略</h2>
-                    <div class="strategy-label">择优标准</div>
-                    <div class="segmented-control" role="radiogroup" aria-label="拟合择优标准">
-                        <label>
-                            <input type="radio" name="selectionMetric" value="rmse" checked>
-                            <span>整体 RMSE</span>
-                        </label>
-                        <label>
-                            <input type="radio" name="selectionMetric" value="balanced">
-                            <span>低电流优先</span>
-                        </label>
-                    </div>
                     <label class="checkbox-label">
                         <input type="checkbox" id="useGlobal">
-                        <span>差分进化全局搜索</span>
+                        <span>扩展搜索</span>
                     </label>
                     <label class="checkbox-label">
                         <input type="checkbox" id="useNelder">
@@ -56,10 +45,10 @@
                     </label>
                     <label class="checkbox-label">
                         <input type="checkbox" id="useLog">
-                        <span>生成低电流候选</span>
+                        <span>对数空间候选</span>
                     </label>
                     <div class="fit-actions">
-                        <button id="fitBtn" class="btn-primary">开始正式拟合</button>
+                        <button id="fitBtn" class="btn-primary">开始拟合</button>
                         <button id="cancelFitBtn" class="btn-danger hidden">取消拟合</button>
                     </div>
                     <div id="progress" class="progress-bar hidden" aria-label="拟合进度">
