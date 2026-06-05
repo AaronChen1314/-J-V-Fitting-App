@@ -47,6 +47,16 @@
                         <input type="checkbox" id="useLog">
                         <span>对数空间候选</span>
                     </label>
+                    <div class="analysis-inputs">
+                        <label class="analysis-input">
+                            <span>自主迭代次数</span>
+                            <input type="number" id="iterationCount" min="1" max="50" step="1" value="10">
+                        </label>
+                        <label class="analysis-input">
+                            <span>Pin (mW/cm²)</span>
+                            <input type="number" id="pinInput" min="0.000001" max="1000000" step="any" value="100">
+                        </label>
+                    </div>
                     <div class="fit-actions">
                         <button id="fitBtn" class="btn-primary">开始拟合</button>
                         <button id="cancelFitBtn" class="btn-danger hidden">取消拟合</button>
@@ -73,6 +83,11 @@
                     <div class="metric"><span>RMSE</span><strong id="metricRmse">--</strong></div>
                     <div class="metric"><span>Jsc (V≈0)</span><strong id="metricJsc">--</strong></div>
                     <div class="metric"><span>Voc</span><strong id="metricVoc">--</strong></div>
+                    <div class="metric"><span>Vmp</span><strong id="metricVmp">--</strong></div>
+                    <div class="metric"><span>Jmp</span><strong id="metricJmp">--</strong></div>
+                    <div class="metric"><span>Pmax</span><strong id="metricPmax">--</strong></div>
+                    <div class="metric"><span>PCE</span><strong id="metricPce">--</strong></div>
+                    <div class="metric"><span>FF</span><strong id="metricFf">--</strong></div>
                     <div class="metric"><span>质量</span><strong id="metricMode">--</strong></div>
                 </section>
                 <div class="chart-container">

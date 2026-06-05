@@ -33,6 +33,23 @@ function formatValue(name, value) {
     return value.toFixed(name === 'Rsh' ? 2 : 4);
 }
 
+function formatMetric(value, digits = 4, suffix = '') {
+    if (!Number.isFinite(value)) return '--';
+    const formatted = Math.abs(value) >= 1e4 || (Math.abs(value) > 0 && Math.abs(value) < 1e-3)
+        ? value.toExponential(4)
+        : value.toFixed(digits);
+    return `${formatted}${suffix}`;
+}
+
+function getAnalysisOptions() {
+    const iterations = Number(document.getElementById('iterationCount')?.value);
+    const pin = Number(document.getElementById('pinInput')?.value);
+    return {
+        iterations: Number.isFinite(iterations) ? Math.min(Math.max(Math.round(iterations), 1), 50) : 10,
+        pin: Number.isFinite(pin) && pin > 0 ? pin : 100
+    };
+}
+
 function valueToSlider(name, value) {
     return paramBounds[name].log ? Math.log10(Math.max(value, 1e-30)) : value;
 }
@@ -141,7 +158,8 @@ function initChart() {
         type: 'scatter',
         data: { datasets: [
             { label: '实验数据', data: [], borderColor: '#2563eb', backgroundColor: '#2563eb', pointRadius: 4 },
-            { label: '模型曲线', data: [], borderColor: '#dc2626', backgroundColor: '#dc2626', borderWidth: 2, pointRadius: 0, showLine: true }
+            { label: '模型曲线', data: [], borderColor: '#dc2626', backgroundColor: '#dc2626', borderWidth: 2, pointRadius: 0, showLine: true },
+            { label: 'MPP', data: [], borderColor: '#059669', backgroundColor: '#059669', pointRadius: 6, pointHoverRadius: 8 }
         ]},
         options: {
             responsive: true, maintainAspectRatio: false, animation: false,
@@ -154,16 +172,25 @@ function initChart() {
     });
 }
 
-function updateChart(V, experimental, fitted = null) {
+function updateChart(V, experimental, fitted = null, power = null) {
     chart.data.datasets[0].data = V.map((x, index) => ({ x, y: experimental[index] }));
     chart.data.datasets[1].data = fitted ? V.map((x, index) => ({ x, y: fitted[index] })) : [];
+    chart.data.datasets[2].data = Number.isFinite(power?.Vmp) && Number.isFinite(power?.Jmp)
+        ? [{ x: power.Vmp, y: power.Jmp }]
+        : [];
     chart.update('none');
 }
 
 function updateMetrics(data = null) {
+    const power = data?.meta?.power || {};
     document.getElementById('metricRmse').textContent = data?.rmse != null ? data.rmse.toFixed(6) : '--';
     document.getElementById('metricJsc').textContent = data?.meta?.Jsc != null ? formatValue('Jph', data.meta.Jsc) : '--';
     document.getElementById('metricVoc').textContent = data?.meta?.Voc != null ? `${data.meta.Voc.toFixed(4)} V` : '--';
+    document.getElementById('metricVmp').textContent = formatMetric(power.Vmp, 4, ' V');
+    document.getElementById('metricJmp').textContent = formatMetric(power.Jmp, 4, ' mA/cm²');
+    document.getElementById('metricPmax').textContent = formatMetric(power.Pmax, 4, ' mW/cm²');
+    document.getElementById('metricPce').textContent = formatMetric(power.PCE, 3, '%');
+    document.getElementById('metricFf').textContent = formatMetric(power.FF, 2, '%');
     document.getElementById('metricMode').textContent = data?.meta?.quality === 'good' ? '可靠' : data?.meta?.quality === 'warning' ? '需复核' : data?.meta?.mode || '--';
 }
 
@@ -177,9 +204,17 @@ function updateQuality(meta = {}) {
 
 function setResultText(data, prefix = '') {
     const meta = data.meta || {};
+    const power = meta.power || {};
+    const residuals = meta.residuals || {};
+    const iterations = meta.iterations || null;
     const lines = [
         `${prefix}RMSE: ${data.rmse.toFixed(6)}`,
         `模式: ${meta.mode || '--'}`,
+        `Pin: ${formatMetric(power.Pin, 4, ' mW/cm²')}`,
+        `MPP: Vmp=${formatMetric(power.Vmp, 4, ' V')}, Jmp=${formatMetric(power.Jmp, 4, ' mA/cm²')}, Pmax=${formatMetric(power.Pmax, 4, ' mW/cm²')}`,
+        `PCE: ${formatMetric(power.PCE, 3, '%')}, FF: ${formatMetric(power.FF, 2, '%')}`,
+        `残差: MAE=${formatMetric(residuals.mae, 6)}, MaxAbs=${formatMetric(residuals.max_abs, 6)}, Std=${formatMetric(residuals.std, 6)}`,
+        ...(iterations ? [`自主迭代: ${iterations.count} 次，最优第 ${iterations.best_index} 次，RMSE=${formatMetric(iterations.best_rmse, 6)}`] : []),
         ...(meta.selected_candidate ? [`入选候选: ${meta.selected_candidate}`] : []),
         ...(meta.selection_metric ? [`择优标准: ${meta.selection_metric === 'balanced' ? '低电流优先' : '整体 RMSE'}`] : []),
         ...(meta.stages?.length ? [`阶段: ${meta.stages.join(' → ')}`] : []),
@@ -192,14 +227,22 @@ function setResultText(data, prefix = '') {
     }
     if (meta.candidates?.length) {
         lines.push('', '候选对比:');
-        for (const candidate of meta.candidates) {
+        for (const candidate of meta.candidates.slice(0, 20)) {
             const selectedMark = candidate.name === meta.selected_candidate ? ' [入选]' : '';
-            const label = candidate.name || candidate.mode || 'candidate';
+            const label = candidate.name || `${candidate.mode || 'candidate'} #${candidate.iteration || 1}`;
             const score = Number.isFinite(candidate.balanced_score) ? candidate.balanced_score : candidate.score;
             lines.push(
                 `- ${label}${selectedMark}: RMSE=${candidate.rmse.toFixed(6)}, 评分=${Number.isFinite(score) ? score.toFixed(6) : '--'}`
             );
         }
+        if (meta.candidates.length > 20) lines.push(`... 另有 ${meta.candidates.length - 20} 个候选已写入导出诊断`);
+    }
+    if (iterations?.runs?.length) {
+        lines.push('', '迭代摘要:');
+        for (const run of iterations.runs.slice(0, 20)) {
+            lines.push(`- #${run.index}: RMSE=${formatMetric(run.rmse, 6)}, 模式=${run.mode || '--'}`);
+        }
+        if (iterations.runs.length > 20) lines.push(`... 另有 ${iterations.runs.length - 20} 次迭代已写入导出诊断`);
     }
     if (meta.warnings?.length) lines.push('', '警告:', ...meta.warnings.map(item => `- ${item}`));
     document.getElementById('resultContainer').textContent = lines.join('\n');
@@ -227,13 +270,14 @@ async function runPreview() {
     previewController?.abort();
     previewController = new AbortController();
     const { params, bounds } = getCurrentParams();
+    const options = getAnalysisOptions();
     try {
         const response = await fetch('/api/preview', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ csv: currentCSV, params, bounds }), signal: previewController.signal
+            body: JSON.stringify({ csv: currentCSV, params, bounds, options }), signal: previewController.signal
         });
         const data = await parseApiResponse(response);
-        updateChart(data.V, data.J_exp, data.J_fit);
+        updateChart(data.V, data.J_exp, data.J_fit, data.meta?.power);
         setResultText(data, '[参数预览] ');
         if (needsInitialGuess && Number.isFinite(data.meta?.Jsc)) {
             needsInitialGuess = false;
@@ -337,7 +381,8 @@ async function runFit() {
     const options = {
         use_global: document.getElementById('useGlobal').checked,
         use_nelder: document.getElementById('useNelder').checked,
-        use_log: document.getElementById('useLog').checked
+        use_log: document.getElementById('useLog').checked,
+        ...getAnalysisOptions()
     };
     fitController = { running: true };
     setFitRunning(true, options);
@@ -346,7 +391,7 @@ async function runFit() {
     try {
         const data = await runLocalFit({ csv: currentCSV, params, bounds, fixed, options });
         lastResult = data;
-        updateChart(data.V, data.J_exp, data.J_fit);
+        updateChart(data.V, data.J_exp, data.J_fit, data.meta?.power);
         setResultText(data);
         updateInputsFromParams(data.params);
         document.getElementById('exportParams').disabled = false;
@@ -393,12 +438,21 @@ document.getElementById('csvFile').addEventListener('change', event => {
 document.querySelectorAll('[data-sample]').forEach(button => button.addEventListener('click', () => loadSample(button.dataset.sample)));
 document.getElementById('fitBtn').addEventListener('click', runFit);
 document.getElementById('cancelFitBtn').addEventListener('click', cancelLocalFit);
+document.getElementById('pinInput').addEventListener('input', () => schedulePreview());
 document.getElementById('exportParams').addEventListener('click', () => {
     if (lastResult) download(JSON.stringify(lastResult, null, 2), 'application/json;charset=utf-8', 'fit_diagnostics.json');
 });
 document.getElementById('exportCSV').addEventListener('click', () => {
     if (!lastResult) return;
-    const rows = ['V,J_Exp,J_Fit', ...lastResult.V.map((value, index) => `${value},${lastResult.J_exp[index]},${lastResult.J_fit[index]}`)];
+    const rows = [
+        'V,J_Exp,J_Fit,Power,Residual',
+        ...lastResult.V.map((value, index) => {
+            const jFit = lastResult.J_fit[index];
+            const power = Number.isFinite(value) && Number.isFinite(jFit) ? value * jFit : '';
+            const residual = Number.isFinite(jFit) && Number.isFinite(lastResult.J_exp[index]) ? jFit - lastResult.J_exp[index] : '';
+            return `${value},${lastResult.J_exp[index]},${jFit},${power},${residual}`;
+        })
+    ];
     download(rows.join('\n'), 'text/csv;charset=utf-8', 'fit_result.csv');
 });
 

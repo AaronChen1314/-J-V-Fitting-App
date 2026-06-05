@@ -314,6 +314,34 @@ header h1 {
     accent-color: #2457a6;
 }
 
+.analysis-inputs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.analysis-input {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.analysis-input span {
+    color: #64748b;
+    font-size: 0.78rem;
+    margin-bottom: 4px;
+}
+
+.analysis-input input {
+    width: 100%;
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid #d9e2ec;
+    border-radius: 8px;
+    font-size: 0.92rem;
+}
+
 .btn-primary {
     width: 100%;
     padding: 14px;
@@ -455,7 +483,7 @@ header h1 {
 
 .metrics-strip {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 12px;
 }
 
@@ -516,6 +544,7 @@ header h1 {
         grid-column: auto;
     }
     .sample-actions,
+    .analysis-inputs,
     .metrics-strip {
         grid-template-columns: 1fr;
     }

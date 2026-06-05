@@ -178,6 +178,56 @@ function logRmse(J, model) {
     return Math.sqrt(sum / J.length);
 }
 
+function boundedInt(value, fallback, min, max) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(Math.max(parsed, min), max);
+}
+
+function getPin(options) {
+    const pin = Number(options?.pin);
+    return Number.isFinite(pin) && pin > 0 ? Math.min(Math.max(pin, 1e-9), 1e6) : 100;
+}
+
+function residualDiagnostics(J, model) {
+    const residuals = [];
+    for (let i = 0; i < J.length; i++) {
+        const value = model[i] - J[i];
+        if (Number.isFinite(value)) residuals.push(value);
+    }
+    if (!residuals.length) return { mean: null, mae: null, max_abs: null, std: null };
+    const mean = residuals.reduce((sum, value) => sum + value, 0) / residuals.length;
+    const mae = residuals.reduce((sum, value) => sum + Math.abs(value), 0) / residuals.length;
+    const maxAbs = Math.max(...residuals.map(value => Math.abs(value)));
+    const variance = residuals.reduce((sum, value) => sum + (value - mean) ** 2, 0) / residuals.length;
+    return { mean, mae, max_abs: maxAbs, std: Math.sqrt(variance) };
+}
+
+function calculatePowerMetrics(params, jsc, voc, options) {
+    const pin = getPin(options);
+    if (!params || !Number.isFinite(jsc) || !Number.isFinite(voc) || jsc <= 0 || voc <= 0) {
+        return { Vmp: null, Jmp: null, Pmax: null, Pin: pin, PCE: null, FF: null };
+    }
+    const points = boundedInt(options?.power_points, 1000, 50, 5000);
+    const V = [];
+    for (let i = 0; i < points; i++) V.push((voc * i) / Math.max(points - 1, 1));
+    const J = doubleDiodeModel(V, params).map(value => -value);
+    let best = null;
+    for (let i = 0; i < V.length; i++) {
+        const p = V[i] * J[i];
+        if (Number.isFinite(p) && V[i] >= 0 && J[i] >= 0 && (!best || p > best.Pmax)) {
+            best = { Vmp: V[i], Jmp: J[i], Pmax: Math.max(p, 0) };
+        }
+    }
+    if (!best) return { Vmp: null, Jmp: null, Pmax: null, Pin: pin, PCE: null, FF: null };
+    return {
+        ...best,
+        Pin: pin,
+        PCE: best.Pmax / pin * 100,
+        FF: voc > 0 && jsc > 0 ? best.Pmax / (voc * jsc) * 100 : null
+    };
+}
+
 function optimize(V, J, base, mode) {
     const { freeNames, x0, full, cleanBounds } = base;
     if (!freeNames.length) {
@@ -299,20 +349,53 @@ function nelderMead(cost, start, maxIter) {
 function fitLocally(payload) {
     const { V, J } = parseCsv(payload.csv);
     const base = buildInputs(payload.params, payload.bounds, payload.fixed);
-    const bases = [base];
-    if (payload.options?.use_global) bases.push(...makeSearchBases(base));
+    const iterationCount = boundedInt(payload.options?.iterations, 10, 1, 50);
     const candidates = [];
-    for (const candidateBase of bases) {
-        candidates.push(optimize(V, J, candidateBase, 'linear'));
-        if (payload.options?.use_log) candidates.push(optimize(V, J, candidateBase, 'log'));
+    const iterationResults = [];
+
+    for (let iteration = 0; iteration < iterationCount; iteration++) {
+        const iterationBase = perturbBase(base, iteration);
+        const bases = [iterationBase];
+        if (payload.options?.use_global) bases.push(...makeSearchBases(iterationBase).slice(0, 2));
+        const before = candidates.length;
+        for (const candidateBase of bases) {
+            const linearCandidate = optimize(V, J, candidateBase, 'linear');
+            linearCandidate.iteration = iteration + 1;
+            candidates.push(linearCandidate);
+            if (payload.options?.use_log) {
+                const logCandidate = optimize(V, J, candidateBase, 'log');
+                logCandidate.iteration = iteration + 1;
+                candidates.push(logCandidate);
+            }
+        }
+        const iterationCandidates = candidates.slice(before);
+        iterationCandidates.sort((a, b) => a.rmse - b.rmse);
+        const bestIteration = iterationCandidates[0];
+        iterationResults.push({
+            index: iteration + 1,
+            rmse: bestIteration.rmse,
+            mode: bestIteration.mode || 'linear',
+            score: bestIteration.score
+        });
+        postMessage({ type: 'progress', message: `iteration ${iteration + 1}/${iterationCount}, best RMSE ${bestIteration.rmse.toFixed(6)}` });
     }
-    candidates.sort((a, b) => a.score - b.score);
+    candidates.sort((a, b) => a.rmse - b.rmse);
     const best = candidates[0];
+    const jsc = estimateJscAtZero(V, J);
+    const voc = estimateVoc(V, J);
     const meta = {
-        Jsc: estimateJscAtZero(V, J),
-        Voc: estimateVoc(V, J),
+        Jsc: jsc,
+        Voc: voc,
         mode: best.mode || 'linear',
-        candidates: candidates.map(c => ({ mode: c.mode, rmse: c.rmse, logRmse: c.logRmse, score: c.score }))
+        power: calculatePowerMetrics(best.params, jsc, voc, payload.options),
+        residuals: residualDiagnostics(J, best.model),
+        iterations: {
+            count: iterationCount,
+            best_index: best.iteration || 1,
+            best_rmse: best.rmse,
+            runs: iterationResults
+        },
+        candidates: candidates.map(c => ({ iteration: c.iteration || 1, mode: c.mode, rmse: c.rmse, logRmse: c.logRmse, score: c.score }))
     };
     return {
         success: true,
@@ -323,6 +406,28 @@ function fitLocally(payload) {
         rmse: best.rmse,
         fixed: payload.fixed || {},
         meta
+    };
+}
+
+function perturbBase(base, iteration) {
+    if (iteration === 0) return {
+        ...base,
+        x0: base.x0.slice(),
+        full: { ...base.full },
+        cleanBounds: { ...base.cleanBounds },
+        freeNames: base.freeNames.slice(),
+    };
+    const golden = 0.61803398875;
+    return {
+        ...base,
+        x0: base.x0.map((value, index) => {
+            const phase = ((iteration + 1) * (index + 2) * golden) % 1;
+            const amplitude = iteration % 3 === 0 ? 0.28 : 0.18;
+            return clamp(value + (phase - 0.5) * amplitude, 0.02, 0.98);
+        }),
+        full: { ...base.full },
+        cleanBounds: { ...base.cleanBounds },
+        freeNames: base.freeNames.slice(),
     };
 }
 

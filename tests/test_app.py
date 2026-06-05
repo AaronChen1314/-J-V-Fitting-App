@@ -54,6 +54,21 @@ class ModelDiagnosticsTests(unittest.TestCase):
         candidates = [{"name": "first", "scores": scores}, {"name": "second", "scores": scores}]
         self.assertEqual(app.select_candidate(candidates, "rmse")["name"], "first")
 
+    def test_power_metrics_find_maximum_power_point(self):
+        params = np.array([10.0, 1e-12, 1e-8, 1.0, 2.0, 1.0, 2000.0])
+        metrics = app.calculate_power_metrics(params, jsc=10.0, voc=1.0, pin=100.0, points=300)
+        self.assertGreater(metrics["Pmax"], 0)
+        self.assertAlmostEqual(metrics["PCE"], metrics["Pmax"], places=8)
+        self.assertAlmostEqual(metrics["FF"], metrics["Pmax"] / (1.0 * 10.0) * 100.0)
+        self.assertGreaterEqual(metrics["Vmp"], 0)
+        self.assertLessEqual(metrics["Vmp"], 1.0)
+
+    def test_power_metrics_return_nulls_without_valid_jsc_voc(self):
+        metrics = app.calculate_power_metrics(np.ones(7), jsc=0.0, voc=0.0, pin=100.0)
+        self.assertIsNone(metrics["Pmax"])
+        self.assertIsNone(metrics["PCE"])
+        self.assertEqual(metrics["Pin"], 100.0)
+
 
 class ApiTests(unittest.TestCase):
     @classmethod
@@ -71,6 +86,8 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(data["success"])
         self.assertEqual(data["meta"]["solver"]["failed_points"], 0)
         self.assertEqual(len(data["V"]), len(data["J_fit"]))
+        self.assertTrue({"Vmp", "Jmp", "Pmax", "Pin", "PCE", "FF"} <= set(data["meta"]["power"]))
+        self.assertIn("residuals", data["meta"])
 
     def test_page_exposes_selection_controls(self):
         html = self.client.get("/").get_data(as_text=True)
@@ -118,6 +135,7 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertLess(data["rmse"], 0.35)
                 self.assertEqual(data["meta"]["solver"]["failed_points"], 0)
+                self.assertTrue({"Vmp", "Jmp", "Pmax", "Pin", "PCE", "FF"} <= set(data["meta"]["power"]))
 
     def test_rmse_selection_never_returns_worse_candidate(self):
         for sample_name, csv in self.samples.items():
@@ -186,6 +204,8 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn("input[name=\"selectionMetric\"]", main_js)
         self.assertIn("function optimize", worker_js)
         self.assertIn("function nelderMead", worker_js)
+        self.assertIn("metricPce", main_js)
+        self.assertIn("calculatePowerMetrics", worker_js)
 
     def test_worker_sample_fit_regression(self):
         targets = {"nbg": 0.45, "wbg": 0.45}
@@ -195,6 +215,10 @@ class ApiTests(unittest.TestCase):
                 result = self._run_worker(payload)
                 self.assertLess(result["rmse"], targets[sample_name])
                 self.assertIn(result["meta"]["mode"], {"linear", "log"})
+                self.assertEqual(result["meta"]["iterations"]["count"], 10)
+                run_rmses = [run["rmse"] for run in result["meta"]["iterations"]["runs"]]
+                self.assertAlmostEqual(result["rmse"], min(run_rmses))
+                self.assertTrue({"Vmp", "Jmp", "Pmax", "Pin", "PCE", "FF"} <= set(result["meta"]["power"]))
 
     def _worker_payload(self, csv):
         voltage, current = app.parse_jv_csv(csv)

@@ -283,6 +283,78 @@ def rmse(J_data_mA, J_model):
     return float(np.sqrt(np.mean((J_data_mA - J_model) ** 2)))
 
 
+def finite_float(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if np.isfinite(parsed) else None
+
+
+def get_pin(options):
+    pin = finite_float((options or {}).get("pin"))
+    if pin is None or pin <= 0:
+        return 100.0
+    return float(np.clip(pin, 1e-9, 1e6))
+
+
+def calculate_power_metrics(params, jsc, voc, pin=100.0, points=1000):
+    jsc = finite_float(jsc)
+    voc = finite_float(voc)
+    pin = get_pin({"pin": pin})
+    if params is None or jsc is None or voc is None or jsc <= 0 or voc <= 0:
+        return {
+            "Vmp": None,
+            "Jmp": None,
+            "Pmax": None,
+            "Pin": pin,
+            "PCE": None,
+            "FF": None,
+        }
+
+    sample_count = bounded_int(points, 1000, 50, 5000)
+    V_dense = np.linspace(0.0, voc, sample_count)
+    J_dense = -double_diode_model(V_dense, *params)
+    power = V_dense * J_dense
+    valid = np.isfinite(V_dense) & np.isfinite(J_dense) & np.isfinite(power)
+    valid &= (V_dense >= 0) & (J_dense >= 0)
+    if not np.any(valid):
+        return {
+            "Vmp": None,
+            "Jmp": None,
+            "Pmax": None,
+            "Pin": pin,
+            "PCE": None,
+            "FF": None,
+        }
+
+    valid_indices = np.where(valid)[0]
+    best_index = int(valid_indices[np.argmax(power[valid])])
+    pmax = max(float(power[best_index]), 0.0)
+    ff = pmax / (voc * jsc) * 100.0 if voc > 0 and jsc > 0 else None
+    return {
+        "Vmp": float(V_dense[best_index]),
+        "Jmp": float(J_dense[best_index]),
+        "Pmax": pmax,
+        "Pin": pin,
+        "PCE": pmax / pin * 100.0 if pin > 0 else None,
+        "FF": ff if ff is not None and np.isfinite(ff) else None,
+    }
+
+
+def residual_diagnostics(J_data_mA, J_model):
+    residuals = np.asarray(J_model, dtype=float) - np.asarray(J_data_mA, dtype=float)
+    finite = residuals[np.isfinite(residuals)]
+    if finite.size == 0:
+        return {"mean": None, "mae": None, "max_abs": None, "std": None}
+    return {
+        "mean": float(np.mean(finite)),
+        "mae": float(np.mean(np.abs(finite))),
+        "max_abs": float(np.max(np.abs(finite))),
+        "std": float(np.std(finite)),
+    }
+
+
 def residual_values(J_data_mA, J_model, use_log):
     if use_log:
         epsilon = 1e-6
@@ -603,6 +675,11 @@ def preview():
     V_data, J_data_mA = parse_jv_csv(data.get("csv", ""))
     p0, b_min, b_max, meta = build_fit_inputs(V_data, J_data_mA, data.get("params"), data.get("bounds"))
     J_preview, solver = double_diode_model(V_data, *p0, return_diagnostics=True)
+    options = data.get("options") or {}
+    meta.update({
+        "power": calculate_power_metrics(p0, meta.get("Jsc"), meta.get("Voc"), get_pin(options)),
+        "residuals": residual_diagnostics(J_data_mA, J_preview),
+    })
     diagnostics = build_diagnostics(
         p0, b_min, b_max, solver, {"success": True, "message": "Preview only."}, {}
     )
@@ -621,14 +698,19 @@ def preview():
 def fit():
     data = get_json_payload()
     V_data, J_data_mA = parse_jv_csv(data.get("csv", ""))
+    options = data.get("options") or {}
     params, J_final, fit_rmse, meta = fit_double_diode(
         V_data,
         J_data_mA,
         params=data.get("params"),
         bounds=data.get("bounds"),
         fixed=data.get("fixed"),
-        options=data.get("options"),
+        options=options,
     )
+    meta.update({
+        "power": calculate_power_metrics(params, meta.get("Jsc"), meta.get("Voc"), get_pin(options)),
+        "residuals": residual_diagnostics(J_data_mA, J_final),
+    })
     return jsonify({
         "success": True,
         "params": dict(zip(PARAM_NAMES, params.tolist())),
